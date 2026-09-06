@@ -148,15 +148,18 @@ class HBStanTrainer(ModelTrainer):
         # STAN_NUM_THREADS once, when it initialises its thread pool, and defaults to a single
         # thread if it is unset. Chains run as separate processes, so the cores have to be
         # divided between them rather than handed to each.
-        threads = self._threads_per_chain()
-        os.environ.setdefault("STAN_NUM_THREADS", str(threads))
+        os.environ.setdefault("STAN_NUM_THREADS", str(self._threads_per_chain()))
+        # Read back rather than reusing the computed value: setdefault leaves an
+        # externally-supplied STAN_NUM_THREADS in place, so the two can differ and the log
+        # must report what Stan will actually use.
+        threads = os.environ["STAN_NUM_THREADS"]
 
         import stan
 
         wandb_run = (loggers or {}).get("wandb")
         logger.info(
-            "HBStanTrainer: %d chains x %d reduce_sum threads (STAN_NUM_THREADS=%s)",
-            self.num_chains, threads, os.environ["STAN_NUM_THREADS"],
+            "HBStanTrainer: %d chains x %s reduce_sum threads",
+            self.num_chains, threads,
         )
 
         if bundle.raw is None or len(bundle.raw) == 0:
