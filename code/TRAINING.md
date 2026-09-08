@@ -110,6 +110,12 @@ second still runs and produces `heldout/final/eval_likelihood`. Full detail in Â
   `run_helpers.maybe_restore_checkpoint_from_wandb`, called from `run_hpc.py`.
 
 ### Other switches that surprise people
+- **`model.training.freeze_gru_core`** (GRU only, default `false`) turns the
+  multisubject GRU into a frozen random reservoir for a controlled ablation. The
+  native seeded initialization is unchanged; all parameters except
+  `subject_embeddings` and the final `readout` are masked to zero updates. The
+  end-of-training held-out path is unchanged and still adapts only each new
+  subject embedding. This switch requires multisubject mode.
 - **`length_bucketing`** (+ `length_bucket_grid`, default 128): trims each
   `random`-mode batch's RNN unroll to the batch's own session length instead of the
   global `T_max`. Big speedup (~1.86Ã— measured on 100-mice disRNN). Requires
@@ -616,6 +622,12 @@ environment.
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change a feature.
+
+### 2026-09-07
+- **Frozen-random GRU reservoir ablation.** Added the opt-in
+  `model.training.freeze_gru_core` switch. It leaves initialization, batching,
+  checkpointing, and held-out embedding adaptation unchanged while restricting
+  source training to subject embeddings and the final choice readout.
 
 ### 2026-09-04
 - **External target transfer and matched neural/Q evaluation.** Held-out
