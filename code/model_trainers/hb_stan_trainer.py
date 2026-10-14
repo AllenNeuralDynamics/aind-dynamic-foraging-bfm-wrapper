@@ -207,7 +207,11 @@ class HBStanTrainer(ModelTrainer):
 
         # Persist the raw draws before anything else is computed from them: the fit cost hours and
         # exists only in memory, so a failure in diagnostics or logging must not lose it.
-        saved = self._save_draws(fit)
+        # One subdirectory per run. `artifact_dir` is the same path for every run of a sweep on HPC
+        # (the recorded config of all nine Stan runs has one shared directory), and the file names
+        # are fixed, so without this a later rung would overwrite an earlier rung's posterior.
+        run_tag = str(getattr(wandb_run, "id", None) or f"seed{self.seed}-{int(time.time())}")
+        saved = self._save_draws(fit, run_tag)
 
         metrics = self._diagnostics(fit, fit_seconds)
         metrics.update({
@@ -282,13 +286,15 @@ class HBStanTrainer(ModelTrainer):
         })
         return out
 
-    def _save_draws(self, fit):
+    def _save_draws(self, fit, run_tag):
         """Persist the population draws. A cohort fit costs hours; keeping summaries only
-        would force a refit for any later question. Called straight after sampling."""
+        would force a refit for any later question. Called straight after sampling, into
+        ``artifact_dir/<run_tag>/`` so runs sharing an ``artifact_dir`` cannot overwrite each other."""
         if not self.artifact_dir:
             return None
-        os.makedirs(self.artifact_dir, exist_ok=True)
-        path = os.path.join(self.artifact_dir, "stan_one_stage_fit.npz")
+        run_dir = os.path.join(self.artifact_dir, run_tag)
+        os.makedirs(run_dir, exist_ok=True)
+        path = os.path.join(run_dir, "stan_one_stage_fit.npz")
         payload = {}
         for name in ("population_mean", "population_scale", "log_sigma_mean",
                      "log_sigma_spread"):

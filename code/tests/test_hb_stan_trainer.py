@@ -94,7 +94,15 @@ class TestFitWiring(unittest.TestCase):
             self.addCleanup(patch.stop)
         sys.modules["stan"].build = fake.build
         bundle = SimpleNamespace(raw=pd.DataFrame({"x": [1]}))
-        return fake, lambda: trainer.fit(bundle)
+
+        def run(run_id=None):
+            loggers = None
+            if run_id is not None:
+                loggers = {"wandb": SimpleNamespace(id=run_id, log=lambda *_: None,
+                                                    summary=SimpleNamespace(update=lambda *_: None))}
+            return trainer.fit(bundle, loggers)
+
+        return fake, run
 
     def test_seed_reaches_stan_build(self):
         fake, run = self._run(HBStanTrainer(seed=7, num_chains=2, num_samples=3, num_warmup=4))
@@ -118,18 +126,37 @@ class TestFitWiring(unittest.TestCase):
             trainer = HBStanTrainer(seed=0, num_chains=2, num_samples=3, artifact_dir=temp)
             _, run = self._run(trainer, diagnostics={"side_effect": RuntimeError("arviz broke")})
             with self.assertRaises(RuntimeError):
-                run()
-            self.assertTrue(os.path.exists(os.path.join(temp, "stan_one_stage_fit.npz")))
+                run("runA")
+            self.assertTrue(os.path.exists(os.path.join(temp, "runA", "stan_one_stage_fit.npz")))
             # The metadata needs the diagnostics, so it is not written in that case.
-            self.assertFalse(os.path.exists(os.path.join(temp, "stan_one_stage_fit.json")))
+            self.assertFalse(os.path.exists(os.path.join(temp, "runA", "stan_one_stage_fit.json")))
 
     def test_metadata_is_written_beside_the_draws_on_success(self):
         with tempfile.TemporaryDirectory() as temp:
             trainer = HBStanTrainer(seed=3, num_chains=2, num_samples=3, artifact_dir=temp)
             _, run = self._run(trainer)
+            run("runA")
+            self.assertTrue(os.path.exists(os.path.join(temp, "runA", "stan_one_stage_fit.npz")))
+            self.assertTrue(os.path.exists(os.path.join(temp, "runA", "stan_one_stage_fit.json")))
+
+    def test_runs_sharing_an_artifact_dir_do_not_overwrite_each_other(self):
+        """Every Stan run of a sweep on HPC has the same artifact_dir; the D~99 rung must not
+        replace the D~29 posterior."""
+        with tempfile.TemporaryDirectory() as temp:
+            for run_id in ("runA", "runB"):
+                trainer = HBStanTrainer(seed=0, num_chains=2, num_samples=3, artifact_dir=temp)
+                _, run = self._run(trainer)
+                run(run_id)
+            for run_id in ("runA", "runB"):
+                self.assertTrue(os.path.exists(os.path.join(temp, run_id, "stan_one_stage_fit.npz")))
+
+    def test_without_a_wandb_run_the_directory_is_still_unique_per_seed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = HBStanTrainer(seed=5, num_chains=2, num_samples=3, artifact_dir=temp)
+            _, run = self._run(trainer)
             run()
-            self.assertTrue(os.path.exists(os.path.join(temp, "stan_one_stage_fit.npz")))
-            self.assertTrue(os.path.exists(os.path.join(temp, "stan_one_stage_fit.json")))
+            (subdir,) = os.listdir(temp)
+            self.assertTrue(subdir.startswith("seed5-"))
 
     def test_missing_stan_program_fails_before_the_cohort_is_built(self):
         trainer = HBStanTrainer(seed=0)
