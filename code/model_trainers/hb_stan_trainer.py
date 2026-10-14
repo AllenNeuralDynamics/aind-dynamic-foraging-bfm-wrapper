@@ -29,13 +29,15 @@ Threading
 httpstan compiles models with ``STAN_THREADS`` defined (``httpstan/models.py``), so the
 model's ``reduce_sum`` **can** thread across subjects within a chain. What it cannot do is
 guess how many threads to use: Stan reads ``STAN_NUM_THREADS`` at runtime and falls back to a
-single thread when it is unset, which is what the first D≈29/D≈99 pair ran as. This trainer
-now sets it from the SLURM allocation, so the job uses the cores it was given -- with 4 chains
-and 32 CPUs each chain threads 8 ways over the subject slice.
+single thread when it is unset. The first D≈29/D≈99 pair did not set it, so one thread per
+chain was expected there; the effective count was not recorded (see the launch record in the
+dispatcher's ``variants/stan-arm``). This trainer now sets it from the SLURM allocation -- with
+4 chains and 32 CPUs each chain is allowed 8 threads over the subject slice.
 
-That makes the CPU request meaningful rather than decorative, and it matters most at the
-large end: D≈99 measured ~53 iterations/hour single-threaded, which projects past any
-reasonable wall clock.
+Whether the extra threads help is a separate question and, so far, unanswered: the one clean
+test (D≈99 on an exclusive node, 16 threads per chain) showed no measurable gain, and chains
+already run as separate processes. The CPU request sets the thread count; it is not evidence
+that more CPUs make the fit faster.
 """
 
 import logging

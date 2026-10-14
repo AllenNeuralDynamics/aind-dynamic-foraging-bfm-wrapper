@@ -623,6 +623,16 @@ environment.
 
 > Add a dated entry (newest first) whenever you add or change a feature.
 
+### 2026-10-14
+- **`HBStanTrainer`: the Stan arm of the HB baseline.** `model: hb_hattori_stan` fits the same
+  three-level Hattori2019 model as `HBTrainer`, with pystan, on the same cohort (same
+  `data.subject_ratio` and `seed`, same cohort arrays via `hb_trainer`'s own helpers). It fits
+  the population only and logs no `heldout/*`, so a Stan run is **not** a rung on the scaling
+  curve. Sampler settings default to the NumPyro ladder's (2000 warmup, 2000 draws, 4 chains).
+  `STAN_NUM_THREADS` is set from the SLURM allocation (`SLURM_CPUS_PER_TASK // num_chains`) unless
+  the environment already sets it; whether more threads speed the fit is not established.
+  Tests: `tests/test_hb_stan_trainer.py` (thread count and seed wiring; no Stan install needed).
+
 ### 2026-09-07
 - **Frozen-random GRU reservoir ablation.** Added the opt-in
   `model.training.freeze_gru_core` switch. It leaves initialization, batching,
