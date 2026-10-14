@@ -61,6 +61,10 @@ gpu = [
 # httpstan; no separate CmdStan install is needed. Install this extra in the launch environment.
 stan = [
     "pystan>=3,<4",
+    # HBStanTrainer._diagnostics imports arviz after the hours-long sample, so it has to be here: a
+    # missing arviz would otherwise surface only at the end. Same line as the models package's
+    # [bayes] extra (arviz 1.x needs Python >= 3.12, the version the HPC and Beaker images use).
+    "arviz>=1.0,<2",
 ]
 
 [tool.setuptools.packages.find]

@@ -15,6 +15,12 @@ from unittest import mock
 import numpy as np
 import pandas as pd
 
+try:
+    import arviz as az
+    HAS_ARVIZ = True
+except ImportError:  # pragma: no cover - depends on the installed extra
+    HAS_ARVIZ = False
+
 from model_trainers import hb_stan_trainer as hbs
 from model_trainers.hb_stan_trainer import HBStanTrainer
 
@@ -164,6 +170,143 @@ class TestFitWiring(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             run()
         hbs._pad_cohort.assert_not_called()
+
+
+def _ragged_cohort():
+    """Two subjects: 3 and 2 sessions, trial counts 4, 2, 3 and 4, 1, padded to (2, 3, 4)."""
+    choice = np.zeros((2, 3, 4), dtype=int)
+    choice[0, 0] = [1, 0, 1, 0]
+    reward = np.zeros((2, 3, 4))
+    reward[0, 0, :] = [1, 0, 0, 1]
+    valid = np.zeros((2, 3, 4), dtype=bool)
+    for (s, m), k in {(0, 0): 4, (0, 1): 2, (0, 2): 3, (1, 0): 4, (1, 1): 1}.items():
+        valid[s, m, :k] = True
+    session_mask = np.array([[True, True, True], [True, True, False]])
+    return choice, reward, valid, session_mask
+
+
+class TestCohortToStanData(unittest.TestCase):
+    """The per-session trial COUNTS replace the mask, so a wrong count selects wrong trials."""
+
+    def test_counts_shapes_and_values_for_a_ragged_cohort(self):
+        data = hbs.cohort_to_stan_data(*_ragged_cohort(), beta_max=6.0)
+        self.assertEqual((data["S"], data["M"], data["T"]), (2, 3, 4))
+        self.assertEqual(data["n_sessions"], [3, 2])
+        self.assertEqual(data["n_trials"], [[4, 2, 3], [4, 1, 0]])
+        self.assertEqual(data["beta_max"], 6.0)
+        self.assertEqual(data["choice"][0][0], [1, 0, 1, 0])
+        self.assertEqual(data["reward"][0][0], [1, 0, 0, 1])
+
+    def test_reward_is_binarised(self):
+        choice, reward, valid, session_mask = _ragged_cohort()
+        reward = reward * 2.5
+        data = hbs.cohort_to_stan_data(choice, reward, valid, session_mask)
+        self.assertEqual(data["reward"][0][0], [1, 0, 0, 1])
+
+    def test_a_noncontiguous_valid_mask_is_rejected(self):
+        choice, reward, valid, session_mask = _ragged_cohort()
+        valid[0, 0] = [True, False, True, True]          # a hole in the middle
+        with self.assertRaises(ValueError):
+            hbs.cohort_to_stan_data(choice, reward, valid, session_mask)
+
+    def test_valid_trials_after_the_prefix_are_rejected(self):
+        choice, reward, valid, session_mask = _ragged_cohort()
+        valid[1, 1] = [False, True, False, False]        # one valid trial, but not at index 0
+        with self.assertRaises(ValueError):
+            hbs.cohort_to_stan_data(choice, reward, valid, session_mask)
+
+
+def _pystan_flat(per_chain):
+    """Flatten ``(chain, draw)`` the way PyStan 3 does: draw-major, chain innermost."""
+    return np.asarray(per_chain).T.reshape(-1)
+
+
+class _FakeFit(dict):
+    """``fit[name]`` lookups, as the trainer uses them."""
+
+
+class TestChainsFirst(unittest.TestCase):
+    def test_recovers_each_chain(self):
+        per_chain = np.array([[0, 1, 2], [100, 101, 102], [200, 201, 202], [300, 301, 302]])
+        np.testing.assert_array_equal(hbs.chains_first(_pystan_flat(per_chain), 4, 3), per_chain)
+
+    def test_the_chain_major_reshape_is_wrong(self):
+        per_chain = np.array([[0, 1, 2], [100, 101, 102], [200, 201, 202], [300, 301, 302]])
+        self.assertEqual(_pystan_flat(per_chain).reshape(4, 3)[0].tolist(), [0, 100, 200])
+
+    def test_wrong_length_is_rejected(self):
+        with self.assertRaises(ValueError):
+            hbs.chains_first(np.zeros(10), 4, 3)
+
+
+@unittest.skipUnless(HAS_ARVIZ, "arviz not installed")
+class TestDiagnostics(unittest.TestCase):
+    """``_diagnostics`` against draws whose chains are distinguishable."""
+
+    C, S = 4, 400
+
+    def _fit(self, chain_offsets, diverging=0):
+        rng = np.random.default_rng(0)
+        per_chain = {i: rng.normal(size=(self.C, self.S)) + np.asarray(chain_offsets)[:, None]
+                     for i in range(5)}
+        pm = np.stack([_pystan_flat(per_chain[i]) for i in range(5)])
+        div = np.zeros(self.C * self.S)
+        div[:diverging] = 1
+        return _FakeFit(population_mean=pm, divergent__=div), per_chain
+
+    def test_well_mixed_chains_give_rhat_near_one_and_the_expected_ess(self):
+        fit, per_chain = self._fit([0, 0, 0, 0])
+        out = HBStanTrainer(num_chains=self.C, num_samples=self.S)._diagnostics(fit, 100.0)
+        self.assertLess(out["hb/max_rhat"], 1.05)
+        expected = min(float(az.ess(per_chain[i], method="bulk")) for i in range(5))
+        self.assertAlmostEqual(out["hb/min_ess_bulk"], expected, places=6)
+        self.assertAlmostEqual(out["hb/min_ess_per_draw"], expected / (self.C * self.S))
+        self.assertAlmostEqual(out["hb/min_ess_per_second"], expected / 100.0)
+        self.assertEqual(out["hb/n_draws"], self.C * self.S)
+
+    def test_chains_at_different_levels_are_detected(self):
+        """The old chain-major reshape mixed chains and reported R-hat near 1 here."""
+        fit, _ = self._fit([0.0, 3.0, 6.0, 9.0])
+        out = HBStanTrainer(num_chains=self.C, num_samples=self.S)._diagnostics(fit, 100.0)
+        self.assertGreater(out["hb/max_rhat"], 1.5)
+
+    def test_divergences_are_counted_and_missing_is_minus_one(self):
+        fit, _ = self._fit([0, 0, 0, 0], diverging=7)
+        trainer = HBStanTrainer(num_chains=self.C, num_samples=self.S)
+        self.assertEqual(trainer._diagnostics(fit, 1.0)["hb/divergences"], 7)
+        del fit["divergent__"]
+        self.assertEqual(trainer._diagnostics(fit, 1.0)["hb/divergences"], -1)
+
+
+class TestRunDirectoryFallback(unittest.TestCase):
+    def test_two_fits_with_the_same_seed_get_different_directories(self):
+        """Without a W&B run id the directory name must not depend on the clock."""
+        with tempfile.TemporaryDirectory() as temp:
+            dirs = set()
+            for _ in range(2):
+                trainer = HBStanTrainer(seed=5, num_chains=2, num_samples=3, artifact_dir=temp)
+                fake = _FakeStan()
+                patches = [
+                    mock.patch.dict(sys.modules, {"stan": types.ModuleType("stan")}),
+                    mock.patch.object(hbs, "_extract_subject_sessions", return_value=([], [], None)),
+                    mock.patch.object(hbs, "_pad_cohort", return_value=(
+                        np.zeros((2, 3, 4)), np.zeros((2, 3, 4)), np.ones((2, 3, 4), bool),
+                        np.ones((2, 3), bool), ["a", "b"])),
+                    mock.patch.object(hbs, "cohort_to_stan_data", return_value={}),
+                    mock.patch.object(hbs, "_source_revisions", return_value={}),
+                    mock.patch.object(hbs, "_stan_program", return_value="p"),
+                    mock.patch.object(HBStanTrainer, "_diagnostics", return_value={}),
+                    mock.patch.object(hbs.time, "time", return_value=1000.0),   # frozen clock
+                ]
+                for patch in patches:
+                    patch.start()
+                sys.modules["stan"].build = fake.build
+                try:
+                    trainer.fit(SimpleNamespace(raw=pd.DataFrame({"x": [1]})))
+                finally:
+                    mock.patch.stopall()
+            dirs = {d for d in os.listdir(temp)}
+            self.assertEqual(len(dirs), 2, dirs)
 
 
 if __name__ == "__main__":

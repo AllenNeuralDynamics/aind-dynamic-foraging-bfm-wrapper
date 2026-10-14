@@ -43,6 +43,7 @@ that more CPUs make the fit faster.
 import logging
 import os
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -64,6 +65,22 @@ PARAM_NAMES = (
     "softmax_inverse_temperature",
     "bias_l",
 )
+
+
+def chains_first(flat, num_chains, num_samples):
+    """Reshape PyStan's flat draw axis to ``(..., chain, draw)``.
+
+    ``fit[name]`` has a trailing axis of length ``num_samples * num_chains`` in DRAW-MAJOR order
+    with the chain index innermost (PyStan 3 builds it from a ``(param, draw, chain)`` array), so
+    element ``k`` is draw ``k // num_chains`` of chain ``k % num_chains``. ``reshape(num_chains,
+    num_samples)`` puts consecutive draws of all chains into each "chain"; R-hat and ESS computed
+    from that are not valid. An earlier version of this trainer did exactly that and logged ESS
+    about 6x too high for the D~29 fit.
+    """
+    flat = np.asarray(flat)
+    if flat.shape[-1] != num_chains * num_samples:
+        raise ValueError(f"last axis is {flat.shape[-1]}, expected {num_chains} x {num_samples}")
+    return np.swapaxes(flat.reshape(*flat.shape[:-1], num_samples, num_chains), -1, -2)
 
 
 def cohort_to_stan_data(choice_arr, reward_arr, valid_mask, session_mask,
@@ -210,7 +227,7 @@ class HBStanTrainer(ModelTrainer):
         # One subdirectory per run. `artifact_dir` is the same path for every run of a sweep on HPC
         # (the recorded config of all nine Stan runs has one shared directory), and the file names
         # are fixed, so without this a later rung would overwrite an earlier rung's posterior.
-        run_tag = str(getattr(wandb_run, "id", None) or f"seed{self.seed}-{int(time.time())}")
+        run_tag = str(getattr(wandb_run, "id", None) or f"seed{self.seed}-{uuid.uuid4().hex[:8]}")
         saved = self._save_draws(fit, run_tag)
 
         metrics = self._diagnostics(fit, fit_seconds)
@@ -254,9 +271,8 @@ class HBStanTrainer(ModelTrainer):
     def _diagnostics(self, fit, fit_seconds):
         """R-hat / bulk ESS on the population means, plus divergences.
 
-        Reshaped to ``(chain, draw)`` before ArviZ sees them: pystan returns
-        ``(*dims, chains * samples)`` ordered chain-major, and computing r_hat on the flat
-        vector would treat four chains as one long one and report a meaningless value.
+        Reshaped to ``(chain, draw)`` with :func:`chains_first` before ArviZ sees them: PyStan's
+        flat axis has the chain innermost, and any other reshape mixes the chains.
         """
         import arviz as az
 
@@ -265,7 +281,7 @@ class HBStanTrainer(ModelTrainer):
         rhats, esss = [], []
         out = {}
         for i, name in enumerate(PARAM_NAMES):
-            draws = population_mean[i].reshape(self.num_chains, self.num_samples)
+            draws = chains_first(population_mean[i], self.num_chains, self.num_samples)
             ess = float(az.ess(draws, method="bulk"))
             rhat = float(az.rhat(draws))
             rhats.append(rhat)

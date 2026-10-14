@@ -625,7 +625,9 @@ environment.
 
 ### 2026-10-14
 - **`HBStanTrainer`: the Stan arm of the HB baseline.** `model: hb_hattori_stan` fits the same
-  three-level Hattori2019 model as `HBTrainer`, with pystan, on the same cohort (same
+  three-level Hattori2019 model as `HBTrainer`, with pystan (the Stan program uses `Phi_approx` for the
+  bounded session parameters where NumPyro uses the exact normal CDF, so the posteriors are nearly,
+  not exactly, identical), on the same cohort (same
   `data.subject_ratio` and `seed`, same cohort arrays via `hb_trainer`'s own helpers). It fits
   the population only and logs no `heldout/*`, so a Stan run is **not** a rung on the scaling
   curve. Sampler settings default to the NumPyro ladder's (2000 warmup, 2000 draws, 4 chains).
@@ -637,8 +639,11 @@ environment.
   without it fails early with a clear message. Needs the new `stan` extra (`pip install -e ".[stan]"`,
   PyStan 3) and an `aind-dynamic-foraging-models` that ships `hb_three_level.stan`; the models
   minimum in `pyproject.toml` is not raised yet because no release contains the file.
-  Tests: `tests/test_hb_stan_trainer.py` (thread split, and `fit()` against a fake `stan` module for
-  seed wiring, persistence order and early failure; no Stan install needed).
+  ESS and R-hat are computed with the chain axis taken from PyStan's layout (`chains_first`): an earlier
+  version reshaped it chain-major, mixed the chains and logged ESS about 6x too high.
+  Tests: `tests/test_hb_stan_trainer.py` (thread split, `fit()` against a fake `stan` module for seed wiring,
+  persistence order and early failure, data marshalling for ragged cohorts, and the diagnostics against
+  draws with distinguishable chains; no Stan install needed, the diagnostics tests need arviz).
 
 ### 2026-09-07
 - **Frozen-random GRU reservoir ablation.** Added the opt-in
