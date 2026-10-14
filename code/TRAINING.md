@@ -631,7 +631,13 @@ environment.
   curve. Sampler settings default to the NumPyro ladder's (2000 warmup, 2000 draws, 4 chains).
   `STAN_NUM_THREADS` is set from the SLURM allocation (`SLURM_CPUS_PER_TASK // num_chains`) unless
   the environment already sets it; whether more threads speed the fit is not established.
-  Tests: `tests/test_hb_stan_trainer.py` (thread count and seed wiring; no Stan install needed).
+  The raw draws are written straight after sampling, before diagnostics, so a failure there cannot
+  lose an hours-long fit; the Stan program is read before the cohort is built, so a models package
+  without it fails early with a clear message. Needs the new `stan` extra (`pip install -e ".[stan]"`,
+  PyStan 3) and an `aind-dynamic-foraging-models` that ships `hb_three_level.stan`; the models
+  minimum in `pyproject.toml` is not raised yet because no release contains the file.
+  Tests: `tests/test_hb_stan_trainer.py` (thread split, and `fit()` against a fake `stan` module for
+  seed wiring, persistence order and early failure; no Stan install needed).
 
 ### 2026-09-07
 - **Frozen-random GRU reservoir ablation.** Added the opt-in

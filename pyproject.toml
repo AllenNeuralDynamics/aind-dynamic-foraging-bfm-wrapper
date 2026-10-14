@@ -57,6 +57,11 @@ dev = [
 gpu = [
     "jax[cuda12]==0.6.1",
 ]
+# The Stan arm of the HB baseline (model_trainers/hb_stan_trainer.py). PyStan 3 builds models through
+# httpstan; no separate CmdStan install is needed. Install this extra in the launch environment.
+stan = [
+    "pystan>=3,<4",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

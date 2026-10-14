@@ -167,6 +167,10 @@ class HBStanTrainer(ModelTrainer):
         if bundle.raw is None or len(bundle.raw) == 0:
             raise ValueError("HBStanTrainer requires bundle.raw with trial-level rows.")
 
+        # Read the Stan program before any expensive work, so a models package that lacks it
+        # fails here with a clear message rather than after the cohort has been assembled.
+        program = _stan_program()
+
         choices, rewards, _ = _extract_subject_sessions(bundle.raw)
         choice_arr, reward_arr, valid_mask, session_mask, subject_ids = _pad_cohort(
             choices, rewards
@@ -183,8 +187,6 @@ class HBStanTrainer(ModelTrainer):
         data = cohort_to_stan_data(
             choice_arr, reward_arr, valid_mask, session_mask, beta_max=self.beta_max
         )
-
-        program = _stan_program()
 
         # Build and sampling are timed apart. Stan compiles once to a binary; NumPyro pays JIT
         # inside its first sampling call. Reporting one number would flatter whichever
@@ -203,6 +205,10 @@ class HBStanTrainer(ModelTrainer):
         fit_seconds = time.time() - started
         logger.info("HBStanTrainer: population fitted in %.0fs", fit_seconds)
 
+        # Persist the raw draws before anything else is computed from them: the fit cost hours and
+        # exists only in memory, so a failure in diagnostics or logging must not lose it.
+        saved = self._save_draws(fit)
+
         metrics = self._diagnostics(fit, fit_seconds)
         metrics.update({
             "hb/build_seconds": build_seconds,
@@ -213,8 +219,8 @@ class HBStanTrainer(ModelTrainer):
             "hb/framework": "stan",
         })
 
-        saved = self._save(fit, subject_ids, metrics)
         if saved:
+            self._save_meta(saved, subject_ids, metrics)
             metrics["hb/artifact"] = saved
 
         if wandb_run is not None:
@@ -276,14 +282,11 @@ class HBStanTrainer(ModelTrainer):
         })
         return out
 
-    def _save(self, fit, subject_ids, metrics):
+    def _save_draws(self, fit):
         """Persist the population draws. A cohort fit costs hours; keeping summaries only
-        would force a refit for any later question."""
+        would force a refit for any later question. Called straight after sampling."""
         if not self.artifact_dir:
             return None
-        import json
-        import os
-
         os.makedirs(self.artifact_dir, exist_ok=True)
         path = os.path.join(self.artifact_dir, "stan_one_stage_fit.npz")
         payload = {}
@@ -294,6 +297,13 @@ class HBStanTrainer(ModelTrainer):
             except (KeyError, TypeError):
                 continue
         np.savez_compressed(path, **payload)
+        logger.info("HBStanTrainer: wrote %s", path)
+        return path
+
+    def _save_meta(self, path, subject_ids, metrics):
+        """Write the provenance and metrics beside the draws, once diagnostics exist."""
+        import json
+
         meta = {
             "framework": "stan",
             "n_subjects": len(subject_ids),
@@ -308,8 +318,7 @@ class HBStanTrainer(ModelTrainer):
         }
         with open(path.replace(".npz", ".json"), "w") as handle:
             json.dump(meta, handle, indent=2, default=str)
-        logger.info("HBStanTrainer: wrote %s", path)
-        return path
+        logger.info("HBStanTrainer: wrote %s", path.replace(".npz", ".json"))
 
 
 def _stan_program():
@@ -326,5 +335,21 @@ def _stan_program():
     path = os.path.join(
         os.path.dirname(hb.__file__), "benchmarks", "reference_stan", "hb_three_level.stan"
     )
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path} not found. hb_three_level.stan ships in aind-dynamic-foraging-models releases "
+            "that include the Stan three-level model; the installed version "
+            f"({_models_version()}) does not. Install a release or branch that has it."
+        )
     with open(path) as handle:
         return handle.read()
+
+
+def _models_version():
+    try:
+        from importlib.metadata import version
+
+        return version("aind-dynamic-foraging-models")
+    except Exception:  # pragma: no cover - metadata is absent for some editable installs
+        return "unknown version"
+
