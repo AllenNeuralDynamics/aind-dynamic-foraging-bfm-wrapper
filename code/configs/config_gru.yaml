@@ -169,6 +169,7 @@ model:
     loss: categorical         # categorical
     loss_param: 1             # loss hyperparameter
     max_grad_norm: 1.0        # gradient-norm clip threshold
+    freeze_gru_core: false    # true -> train only subject embeddings + final readout
 
     # ── Session-delta regularization (multisubject + session conditioning) ──
     lambda_reg_session: 0.0   # >=0; 0 disables zero-mean session-delta regularization; try 1.0

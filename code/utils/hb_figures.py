@@ -44,6 +44,40 @@ PARAM_NAMES = (
     "bias_l",
 )
 
+#: Fixed x-axis range per parameter, in the model's own (bounded) units.
+#:
+#: Mirrors ``hierarchical_bayes.plotting.PARAM_XLIM``, which is the source of truth. The
+#: duplication is deliberate and matches how this module already treats ``PARAM_NAMES`` and
+#: ``to_bounded``: it exists to log figures without importing the models plotting stack, so
+#: importing that constant would defeat its purpose and couple in-run logging to a models
+#: version. Keep the two in step when either changes.
+#:
+#: Why fixed at all: autoscaling to the posterior's own mass makes every panel look equally
+#: well determined and makes rungs incomparable -- a parameter pinned at 0.02 and one spread
+#: across half its support render at the same width, and the same parameter changes scale
+#: between D=10 and D=614. Fixing the axis puts the width of the posterior on the page.
+#:
+#: The three rates are probabilities on (0, 1) and the inverse temperature is bounded by
+#: ``beta_max``, so those are supports rather than choices, and the temperature panel doubles
+#: as a check on whether the posterior is pressing against that ceiling. ``bias_l`` is
+#: unbounded; +/-0.5 is a reporting convention, not a limit.
+PARAM_XLIM = {
+    "learn_rate_rew": (0.0, 1.0),
+    "learn_rate_unrew": (0.0, 1.0),
+    "forget_rate_unchosen": (0.0, 1.0),
+    "softmax_inverse_temperature": (0.0, None),   # None -> beta_max
+    "bias_l": (-0.5, 0.5),
+}
+
+
+def _param_xlim(name, beta_max=10.0):
+    """Canonical ``(lo, hi)`` for a parameter, or ``None`` if it has no convention."""
+    span = PARAM_XLIM.get(name)
+    if span is None:
+        return None
+    lo, hi = span
+    return (lo, float(beta_max) if hi is None else hi)
+
 
 def load_fit(netcdf_path, sample_stats_path=None):
     """Read a saved fit back as ``{group_name: xarray.Dataset}``.
@@ -223,13 +257,23 @@ def plot_population_posteriors(groups, beta_max=10.0, path=None):
     for i, (ax, name) in enumerate(zip(axes[:, 0], PARAM_NAMES)):
         values = to_bounded(draws[:, i], i, beta_max)
         spread = float(values.max() - values.min())
+        span = _param_xlim(name, beta_max)
         if spread > 0 and len(np.unique(values)) > 2:
             kde = gaussian_kde(values)
-            grid = np.linspace(values.min() - 0.18 * spread, values.max() + 0.18 * spread, 200)
+            # Evaluate across the WHOLE fixed axis, not just the data's own spread. A grid
+            # padded around the draws would leave the density curve stopping partway across
+            # a fixed panel, which reads as missing data rather than as negligible mass.
+            if span is not None:
+                grid = np.linspace(span[0], span[1], 200)
+            else:
+                grid = np.linspace(values.min() - 0.18 * spread,
+                                   values.max() + 0.18 * spread, 200)
             ax.fill_between(grid, kde(grid), alpha=0.55, lw=0)
             ax.plot(grid, kde(grid), lw=1.0)
         else:
             ax.axvline(float(values.mean()), lw=1.4)
+        if span is not None:
+            ax.set_xlim(*span)
         ax.set_yticks([])
         ax.set_ylabel(name.replace("_", "\n"), rotation=0, ha="right",
                       va="center", fontsize=6, labelpad=4)

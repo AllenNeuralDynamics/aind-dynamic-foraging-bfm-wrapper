@@ -350,6 +350,7 @@ class TestGruTrainer(unittest.TestCase):
         output = trainer.fit(self.multisubject_bundle)
 
         self.assertTrue(output["multisubject"])
+        self.assertNotIn("parameter_training", output)
         self.assertIn("subject_artifacts", output)
         self.assertTrue((self.output_dir / "subject_index_map.json").exists())
         self.assertTrue((self.output_dir / "subject_embeddings.pkl").exists())
@@ -365,6 +366,76 @@ class TestGruTrainer(unittest.TestCase):
         params = json.loads((self.output_dir / "params.json").read_text())
         self.assertIn("multisubject_gru", params)
         self.assertIn("subject_embeddings", params["multisubject_gru"])
+
+    def test_freeze_gru_core_updates_only_embeddings_and_readout(self):
+        trainer = GruTrainer(
+            architecture={
+                "multisubject": True,
+                "hidden_size": 8,
+                "num_layers": 1,
+                "subject_embedding_size": 3,
+            },
+            training={
+                "lr": 1e-2,
+                "n_steps": 5,
+                "loss": "categorical",
+                "loss_param": 1,
+                "max_grad_norm": 1.0,
+                "freeze_gru_core": True,
+                "checkpoint_every_n_steps": 0,
+                "checkpoint_run_heldout_eval": False,
+                "save_output_df": False,
+            },
+            output_dir=str(self.output_dir),
+            seed=42,
+        )
+
+        output = trainer.fit(self.multisubject_bundle)
+        initial = json.loads(
+            (self.output_dir / "initialization" / "before_training" / "params.json").read_text()
+        )
+        final = json.loads((self.output_dir / "params.json").read_text())
+
+        gru_module = next(name for name in initial if name.endswith("/~/gru"))
+        readout_module = next(name for name in initial if name.endswith("/~/readout"))
+        for parameter_name, initial_value in initial[gru_module].items():
+            self.assertTrue(
+                np.array_equal(initial_value, final[gru_module][parameter_name]),
+                f"GRU parameter changed: {parameter_name}",
+            )
+        self.assertFalse(
+            np.array_equal(
+                initial["multisubject_gru"]["subject_embeddings"],
+                final["multisubject_gru"]["subject_embeddings"],
+            )
+        )
+        self.assertTrue(
+            any(
+                not np.array_equal(initial_value, final[readout_module][parameter_name])
+                for parameter_name, initial_value in initial[readout_module].items()
+            )
+        )
+        self.assertTrue(output["parameter_training"]["freeze_gru_core"])
+        self.assertGreater(output["parameter_training"]["trainable_parameter_count"], 0)
+        self.assertGreater(output["parameter_training"]["frozen_parameter_count"], 0)
+
+    def test_freeze_gru_core_requires_multisubject_mode(self):
+        trainer = GruTrainer(
+            architecture={"hidden_size": 8, "num_layers": 1},
+            training={
+                "lr": 1e-3,
+                "n_steps": 1,
+                "loss": "categorical",
+                "loss_param": 1,
+                "max_grad_norm": 1.0,
+                "freeze_gru_core": True,
+            },
+            output_dir=str(self.output_dir),
+            seed=42,
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires a multisubject GRU"):
+            trainer.fit(self.bundle)
 
     def test_multisubject_checkpoint_training_plots_subject_embeddings(self):
         trainer = GruTrainer(

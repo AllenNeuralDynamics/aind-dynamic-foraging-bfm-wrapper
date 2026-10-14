@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
+import haiku as hk
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
@@ -59,6 +60,53 @@ from utils.session_regularized_training import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_frozen_gru_core_update_mask(params: Any) -> tuple[Any, dict[str, int]]:
+    """Train only multisubject embeddings and the final GRU readout."""
+    found_subject_embeddings = False
+    found_readout = False
+    found_gru = False
+    trainable_parameter_count = 0
+    frozen_parameter_count = 0
+
+    def _mask_parameter(module_name: str, parameter_name: str, value: Any) -> Any:
+        nonlocal found_subject_embeddings
+        nonlocal found_readout
+        nonlocal found_gru
+        nonlocal trainable_parameter_count
+        nonlocal frozen_parameter_count
+
+        is_subject_embedding = parameter_name == "subject_embeddings"
+        is_readout = module_name.endswith("/~/readout")
+        is_gru = module_name.endswith("/~/gru")
+        found_subject_embeddings = found_subject_embeddings or is_subject_embedding
+        found_readout = found_readout or is_readout
+        found_gru = found_gru or is_gru
+        parameter_count = int(np.size(value))
+        if is_subject_embedding or is_readout:
+            trainable_parameter_count += parameter_count
+            return np.ones_like(value)
+        frozen_parameter_count += parameter_count
+        return np.zeros_like(value)
+
+    update_mask = hk.data_structures.map(_mask_parameter, params)
+    missing = []
+    if not found_subject_embeddings:
+        missing.append("subject_embeddings")
+    if not found_readout:
+        missing.append("readout")
+    if not found_gru:
+        missing.append("gru")
+    if missing:
+        raise ValueError(
+            "freeze_gru_core could not identify required parameter groups: "
+            + ", ".join(missing)
+        )
+    return update_mask, {
+        "trainable_parameter_count": trainable_parameter_count,
+        "frozen_parameter_count": frozen_parameter_count,
+    }
 
 
 def _to_dict(config: Mapping[str, Any] | DictConfig) -> Dict[str, Any]:
@@ -747,6 +795,13 @@ class GruTrainer(BaseMultisubjectTrainer):
         if args.checkpoint_save_output_df_every_n < 0:
             raise ValueError("training.checkpoint_save_output_df_every_n must be >= 0")
 
+        freeze_gru_core = bool(self.training.get("freeze_gru_core", False))
+        if freeze_gru_core and not is_multisubject:
+            raise ValueError(
+                "training.freeze_gru_core requires a multisubject GRU so subject "
+                "embeddings remain trainable."
+            )
+
         logger.info("max_grad_norm = %s", args.max_grad_norm)
 
         make_network = make_gru_network(
@@ -829,6 +884,8 @@ class GruTrainer(BaseMultisubjectTrainer):
                 int(reg_subject_indices.shape[0]),
             )
 
+        parameter_update_mask = None
+
         def _train_network_with_optional_session_regularization(
             *,
             params: Any | None = None,
@@ -856,6 +913,7 @@ class GruTrainer(BaseMultisubjectTrainer):
                 params=params,
                 opt_state=opt_state,
                 opt=optimizer,
+                parameter_update_mask=parameter_update_mask,
                 n_steps=n_steps,
                 max_grad_norm=args.max_grad_norm,
                 random_key=random_key,
@@ -905,6 +963,18 @@ class GruTrainer(BaseMultisubjectTrainer):
             optimizer=optax.adam(args.learning_rate),
             total_step_offset=0,
         )
+        if freeze_gru_core:
+            parameter_update_mask, mask_summary = _build_frozen_gru_core_update_mask(params)
+            output["parameter_training"] = {
+                "freeze_gru_core": True,
+                **mask_summary,
+            }
+            logger.info(
+                "Frozen random GRU reservoir enabled: %d trainable parameters "
+                "(subject embeddings + readout), %d frozen parameters.",
+                mask_summary["trainable_parameter_count"],
+                mask_summary["frozen_parameter_count"],
+            )
 
         # --- Resume from latest full-state checkpoint (preemption recovery) ---
         # Only the chunked checkpoint path writes resumable state, so resume is
@@ -1726,4 +1796,3 @@ class GruTrainer(BaseMultisubjectTrainer):
             wandb_run=wandb_run,
             log_scope=log_scope,
         )
-
