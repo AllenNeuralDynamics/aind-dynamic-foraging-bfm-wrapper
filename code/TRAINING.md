@@ -623,6 +623,28 @@ environment.
 
 > Add a dated entry (newest first) whenever you add or change a feature.
 
+### 2026-10-14
+- **`HBStanTrainer`: the Stan arm of the HB baseline.** `model: hb_hattori_stan` fits the same
+  three-level Hattori2019 model as `HBTrainer`, with pystan (the Stan program uses `Phi_approx` for the
+  bounded session parameters where NumPyro uses the exact normal CDF, so the posteriors are nearly,
+  not exactly, identical), on the same cohort (same
+  `data.subject_ratio` and `seed`, same cohort arrays via `hb_trainer`'s own helpers). It fits
+  the population only and logs no `heldout/*`, so a Stan run is **not** a rung on the scaling
+  curve. Sampler settings default to the NumPyro ladder's (2000 warmup, 2000 draws, 4 chains).
+  `STAN_NUM_THREADS` is set from the SLURM allocation (`SLURM_CPUS_PER_TASK // num_chains`) unless
+  the environment already sets it; whether more threads speed the fit is not established.
+  Artifacts go to `artifact_dir/<wandb run id>/` (HPC sweeps share one `artifact_dir`, so fixed file names
+  would let a later rung overwrite an earlier one). The raw draws are written straight after sampling, before diagnostics, so a failure there cannot
+  lose an hours-long fit; the Stan program is read before the cohort is built, so a models package
+  without it fails early with a clear message. Needs the new `stan` extra (`pip install -e ".[stan]"`,
+  PyStan 3) and an `aind-dynamic-foraging-models` that ships `hb_three_level.stan`; the models
+  minimum in `pyproject.toml` is not raised yet because no release contains the file.
+  ESS and R-hat are computed with the chain axis taken from PyStan's layout (`chains_first`): an earlier
+  version reshaped it chain-major, mixed the chains and logged ESS about 6x too high.
+  Tests: `tests/test_hb_stan_trainer.py` (thread split, `fit()` against a fake `stan` module for seed wiring,
+  persistence order and early failure, data marshalling for ragged cohorts, and the diagnostics against
+  draws with distinguishable chains; no Stan install needed, the diagnostics tests need arviz).
+
 ### 2026-09-07
 - **Frozen-random GRU reservoir ablation.** Added the opt-in
   `model.training.freeze_gru_core` switch. It leaves initialization, batching,
