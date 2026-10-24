@@ -99,6 +99,18 @@ def _load_source_manifest(args: argparse.Namespace) -> tuple[bytes, str, dict]:
     return manifest_bytes, manifest_name, json.loads(manifest_bytes)
 
 
+def _budget(value: str) -> int:
+    k = int(value)
+    if k < 0:
+        raise argparse.ArgumentTypeError("the adaptation budget must be >= 0")
+    return k
+
+
+def _condition(k: int | None) -> str:
+    """``matched_half`` for the full adaptation half, else ``k<K>``."""
+    return "matched_half" if k is None else f"k{k}"
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=DATASETS)
@@ -117,6 +129,13 @@ def _parser() -> argparse.ArgumentParser:
         default="source_runs.json",
         help="the manifest's file name in the study, recorded as source.manifest",
     )
+    parser.add_argument(
+        "--adapt-sessions-per-subject",
+        type=_budget,
+        default=None,
+        help="few-shot budget K: adapt each subject's embedding on its first K adaptation "
+        "sessions (0 = zero-shot); omit for the full matched adaptation half",
+    )
     parser.add_argument("--data-root", type=Path, default=Path("/external"))
     parser.add_argument("--output-root", type=Path, default=Path("/results"))
     return parser
@@ -133,6 +152,9 @@ def main() -> None:
     from post_training_analysis.wandb_model_dir import hydrate_model_dir
 
     manifest_bytes, manifest_name, source_manifest = _load_source_manifest(args)
+    k = args.adapt_sessions_per_subject
+    condition = _condition(k)
+    cell = f"{args.dataset}-{args.source_key}" + ("" if k is None else f"-{condition}")
     try:
         source = source_manifest["runs"][args.source_key]
     except KeyError as exc:
@@ -171,7 +193,8 @@ def main() -> None:
         "target": {
             "dataset": args.dataset,
             "audit": audit,
-            "condition": "matched_half",
+            "condition": condition,
+            "adapt_sessions_per_subject": k,
         },
         "embedding_finetuning": finetuning,
         "meta": {
@@ -191,10 +214,10 @@ def main() -> None:
         group=os.environ.get("WANDB_RUN_GROUP"),
         id=os.environ.get("WANDB_RUN_ID"),
         resume=os.environ.get("WANDB_RESUME", "allow"),
-        name=f"gru-{args.dataset}-{args.source_key}",
+        name=f"gru-{cell}",
         dir=str(args.output_root / "wandb"),
         config=run_config,
-        tags=["external-transfer", "matched-half", "gru"],
+        tags=["external-transfer", condition.replace("_", "-"), "gru"],
     )
     config = {
         "source_run": {
@@ -208,7 +231,7 @@ def main() -> None:
             "dataset_id": DATASET_IDS[args.dataset],
             "batch_size": None,
             "batch_mode": "single",
-            "adapt_sessions_per_subject": None,
+            "adapt_sessions_per_subject": k,
             "seed": int(source["seed"]),
         },
         "heldout_finetuning": {
@@ -225,11 +248,11 @@ def main() -> None:
             "skip_subjects_with_insufficient_sessions": False,
             "keep_media_files": False,
             "selection_policy": finetuning["selection_policy"],
-            "adapt_sessions_per_subject": None,
+            "adapt_sessions_per_subject": k,
         },
         "output": {
             "output_root": str(args.output_root / "transfer"),
-            "run_name_suffix": f"{args.dataset}-{args.source_key}",
+            "run_name_suffix": cell,
         },
         "seed": int(source["seed"]),
     }
@@ -249,6 +272,7 @@ def main() -> None:
             metadata={
                 "dataset": args.dataset,
                 "source_key": args.source_key,
+                "adapt_sessions_per_subject": k,
                 "source_artifact_digest": source["artifact_digest"],
             },
         )

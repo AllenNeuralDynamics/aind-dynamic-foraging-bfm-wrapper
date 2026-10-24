@@ -46,5 +46,26 @@ class TestSourceManifest(unittest.TestCase):
             gru_transfer._parser().parse_args(["--dataset", "chen", "--source-key", "d10-s0"])
 
 
+
+class TestAdaptationBudget(unittest.TestCase):
+    """dispatcher #166: K-shot curves reuse the runner with a per-subject session budget."""
+
+    def _args(self, *argv: str):
+        return gru_transfer._parser().parse_args(
+            ["--dataset", "chen", "--source-key", "d614-s0", "--source-manifest-json", MANIFEST, *argv])
+
+    def test_omitting_the_budget_keeps_the_matched_half_condition(self):
+        args = self._args()
+        self.assertIsNone(args.adapt_sessions_per_subject)
+        self.assertEqual(gru_transfer._condition(args.adapt_sessions_per_subject), "matched_half")
+
+    def test_a_budget_names_its_condition_and_zero_is_zero_shot(self):
+        self.assertEqual(self._args("--adapt-sessions-per-subject", "4").adapt_sessions_per_subject, 4)
+        self.assertEqual(gru_transfer._condition(0), "k0")
+
+    def test_a_negative_budget_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self._args("--adapt-sessions-per-subject", "-1")
+
 if __name__ == "__main__":
     unittest.main()
