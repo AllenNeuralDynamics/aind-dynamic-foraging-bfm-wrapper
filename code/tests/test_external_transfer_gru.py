@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from external_transfer import gru_transfer
 
@@ -66,6 +68,17 @@ class TestAdaptationBudget(unittest.TestCase):
     def test_a_negative_budget_is_rejected(self):
         with self.assertRaises(SystemExit):
             self._args("--adapt-sessions-per-subject", "-1")
+
+
+class TestRunMeta(unittest.TestCase):
+    def test_the_studies_commit_from_the_launcher_reaches_the_run_config(self):
+        env = {"BFM_META_STUDIES_COMMIT": "s" * 40, "DISPATCHER_COMMIT": "d" * 40,
+               "BFM_META_STUDY": "09-gru-cross-species-transfer"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            meta = gru_transfer._run_meta()
+        self.assertEqual(meta["studies_commit"], "s" * 40)
+        self.assertEqual(meta["dispatcher_commit"], "d" * 40)
+        self.assertEqual(meta["study"], "09-gru-cross-species-transfer")
 
 if __name__ == "__main__":
     unittest.main()
