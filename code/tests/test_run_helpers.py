@@ -11,6 +11,7 @@ try:
 
     from utils.run_helpers import (
         _code_versions,
+        _launch_meta,
         apply_dynamic_run_name_components,
         apply_model_penalty_multipliers,
         resolve_disrnn_penalties,
@@ -44,6 +45,46 @@ class TestRunHelpers(unittest.TestCase):
         self.assertEqual(
             versions["foraging_models_commit"], "foraging-models-sha"
         )
+
+    _META_ENV_KEYS = (
+        "BFM_META_STUDY", "BFM_META_VARIANT", "BFM_META_LAUNCH_ID", "BFM_META_LABEL",
+        "BFM_META_NOTE", "BFM_META_CONFIG_HASH", "BFM_META_STUDIES_COMMIT",
+    )
+
+    def _env_without_meta(self) -> dict[str, str]:
+        return {k: v for k, v in os.environ.items() if k not in self._META_ENV_KEYS}
+
+    def test_launch_meta_records_the_studies_commit_from_env(self):
+        env = {
+            **self._env_without_meta(),
+            "BFM_META_STUDY": "08-hb-vs-gru-heldout",
+            "BFM_META_STUDIES_COMMIT": "s" * 40,
+        }
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            meta = _launch_meta({"launch_id": "20261023-120000"})
+
+        self.assertEqual(meta["studies_commit"], "s" * 40)
+        self.assertEqual(meta["study"], "08-hb-vs-gru-heldout")
+        # config-side values the env did not set are kept
+        self.assertEqual(meta["launch_id"], "20261023-120000")
+
+    def test_launch_meta_without_the_env_keeps_the_config_meta_unchanged(self):
+        config_meta = {"study": "01-gru-scaling-law", "studies_commit": "c" * 40}
+
+        with mock.patch.dict(os.environ, self._env_without_meta(), clear=True):
+            meta = _launch_meta(config_meta)
+
+        # a Hydra-injected `+meta.studies_commit` (the HPC route) survives an unset env
+        self.assertEqual(meta, config_meta)
+
+    def test_launch_meta_env_wins_over_the_config_value(self):
+        env = {**self._env_without_meta(), "BFM_META_STUDIES_COMMIT": "e" * 40}
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            meta = _launch_meta({"studies_commit": "c" * 40})
+
+        self.assertEqual(meta["studies_commit"], "e" * 40)
 
     def test_resolve_disrnn_penalties_uses_beta_as_default_base(self):
         resolved = resolve_disrnn_penalties(
