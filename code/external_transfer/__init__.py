@@ -12,5 +12,9 @@ external dataset cache; none is read from a study directory. Study-specific auth
 stay with their study and run on HPC from a studies checkout.
 
     python -m external_transfer.gru_transfer --dataset chen --source-key d10-s0 \
-        --source-manifest-json "$(cat source_runs.json)" --source-manifest-name source_runs.json
+        --source-manifest <studies>/studies/09-gru-cross-species-transfer/source_runs.json
+
+Sweeps pass ``--source-manifest-json`` instead, with the file text written verbatim by study
+09's ``sync_transfer_sweeps.py`` (a shell ``$(cat ...)`` would drop the trailing newline and
+change ``manifest_sha256``).
 """

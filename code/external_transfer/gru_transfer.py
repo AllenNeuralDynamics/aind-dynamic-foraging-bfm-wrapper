@@ -154,6 +154,7 @@ def main() -> None:
         project=source_manifest["project"],
         entity=source_manifest["entity"],
         dest=args.output_root / "source-model",
+        version=source_artifact.version,   # the version whose digest was just checked
     )
     audit = json.loads((args.data_root / f"{args.dataset}.audit.json").read_text())
     finetuning = source_manifest["embedding_finetuning"]

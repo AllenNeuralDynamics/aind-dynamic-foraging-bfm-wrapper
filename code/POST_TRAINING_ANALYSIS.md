@@ -28,8 +28,13 @@ saved run dir ──► resolve_model_run(model_dir, split, checkpoint_policy)
                           (generative, likelihood comparison, embedding space, …)
 ```
 
-- **`run_analysis.py`** — the single command-line entry point. One sub-command per
+- **`run_analysis.py`** — the main command-line entry point. One sub-command per
   analysis type; loads everything from the saved run. Start here.
+- **`external_transfer/`** — `python -m external_transfer.gru_transfer`: transfers a
+  pinned trained GRU (W&B training-output artifact, digest-checked) to an external
+  bandit dataset by fine-tuning a new-subject embedding. Inputs: a source manifest
+  (`--source-manifest-json` text or `--source-manifest` file) and the external dataset
+  cache under `--data-root`. Study 09's Beaker runner.
 - **`post_training_analysis/`** — the analysis implementations (importable Python
   API), exposed through a lazy gateway in `post_training_analysis/__init__.py`.
 - **`evaluation/`** — shared *evaluation primitives* used by **both** training-time
@@ -56,6 +61,7 @@ in-repo `data_loaders.disrnn_dataset` builder (vendored from the retired
 | `post_training_analysis/embedding_space_analysis.py` | Subject-embedding-space visualization (multisubject runs) |
 | `post_training_analysis/baseline_rl_analysis.py` | Baseline-RL analysis from fitted per-session parameters |
 | `post_training_analysis/heldout_finetuning.py` | Held-out subject embedding fine-tuning (**training-adjacent**, [§7](#7-training-adjacent-exceptions)) |
+| `external_transfer/gru_transfer.py` | Source-GRU → external-dataset transfer cell (study 09); `python -m` entry point |
 | `post_training_analysis/*.ipynb` | Exploratory notebooks (`p_switch_*`, `simulate_sessions`) — see [§8](#8-known-gaps--backlog) |
 | `evaluation/heldout_eval_config.py` | `HeldoutEvalConfig` — config→eval bridge (shared by training & eval) |
 | `evaluation/common.py` | Model-agnostic helpers (logit→prob math, identifier/filename normalization, subject/session grouping, param loading) |
@@ -301,6 +307,12 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change an evaluation feature.
+
+### 2026-10-24
+- **`external_transfer.gru_transfer`** moved here from study 09's `run_gru_transfer.py`
+  (dispatcher #179), so Beaker jobs read no study files: the source manifest arrives on
+  the command line. `hydrate_model_dir(..., version=)` downloads the exact artifact
+  version the runner digest-checked.
 
 ### 2026-09-04
 - **External target-transfer evaluation.** Held-out embedding fine-tuning accepts

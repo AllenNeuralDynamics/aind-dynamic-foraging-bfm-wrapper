@@ -123,14 +123,16 @@ def _normalize_index(outputs_dir: Path) -> None:
 
 
 def hydrate_model_dir(run_id: str, *, project: str, entity: str = DEFAULT_ENTITY,
-                      dest: str | Path, model_type: str | None = None) -> Path:
+                      dest: str | Path, model_type: str | None = None,
+                      version: str = "latest") -> Path:
     """Download a finished run's checkpoints and assemble a runnable model_dir.
 
     Returns the model_dir (``<dest>/run``) — pass it straight to
     ``run_analysis ... --model-dir``.
 
     ``model_type`` is read from the run config unless given. It used to be hardcoded to "gru",
-    which silently broke every non-GRU restore.
+    which silently broke every non-GRU restore. ``version`` pins the artifact (``"v3"``) so a
+    caller that already verified one version downloads that same version.
     """
     dest = Path(dest).expanduser()
     model_dir = dest / "run"
@@ -144,7 +146,7 @@ def hydrate_model_dir(run_id: str, *, project: str, entity: str = DEFAULT_ENTITY
     if model_type not in {"gru", "disrnn", "baseline_rl"}:
         raise ValueError(f"Unsupported/unknown model type {model_type!r} for run {run_id}.")
 
-    artifact_ref = f"{entity}/{project}/{model_type}-output-{run_id}:latest"
+    artifact_ref = f"{entity}/{project}/{model_type}-output-{run_id}:{version}"
     logger.info("Downloading %s -> %s", artifact_ref, outputs_dir)
     wandb.Api().artifact(artifact_ref, type="training-output").download(root=str(outputs_dir))
 
