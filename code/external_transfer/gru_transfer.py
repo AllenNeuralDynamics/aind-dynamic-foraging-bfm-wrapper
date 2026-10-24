@@ -111,6 +111,22 @@ def _condition(k: int | None) -> str:
     return "matched_half" if k is None else f"k{k}"
 
 
+def _run_meta() -> dict:
+    """Launch provenance for the run config, from the env the launchers and SLURM scripts set."""
+    return {
+        "study": os.environ.get("BFM_META_STUDY"),
+        "variant": os.environ.get("BFM_META_VARIANT"),
+        "launch_id": os.environ.get("BFM_META_LAUNCH_ID"),
+        # the studies repo commit that held the sweep (the launchers pass it since the split)
+        "studies_commit": os.environ.get("BFM_META_STUDIES_COMMIT"),
+        "dispatcher_commit": os.environ.get("DISPATCHER_COMMIT"),
+        "wrapper_commit": os.environ.get("WRAPPER_COMMIT"),
+        "foraging_models_commit": os.environ.get("FORAGING_MODELS_COMMIT"),
+        "beaker_experiment_id": os.environ.get("BEAKER_EXPERIMENT_ID"),
+        "beaker_job_id": os.environ.get("BEAKER_JOB_ID"),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=DATASETS)
@@ -197,16 +213,7 @@ def main() -> None:
             "adapt_sessions_per_subject": k,
         },
         "embedding_finetuning": finetuning,
-        "meta": {
-            "study": os.environ.get("BFM_META_STUDY"),
-            "variant": os.environ.get("BFM_META_VARIANT"),
-            "launch_id": os.environ.get("BFM_META_LAUNCH_ID"),
-            "dispatcher_commit": os.environ.get("DISPATCHER_COMMIT"),
-            "wrapper_commit": os.environ.get("WRAPPER_COMMIT"),
-            "foraging_models_commit": os.environ.get("FORAGING_MODELS_COMMIT"),
-            "beaker_experiment_id": os.environ.get("BEAKER_EXPERIMENT_ID"),
-            "beaker_job_id": os.environ.get("BEAKER_JOB_ID"),
-        },
+        "meta": _run_meta(),
     }
     run = wandb.init(
         entity="AIND-disRNN",
