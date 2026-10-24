@@ -177,6 +177,7 @@ eval-throttling (item 10) were both tested and gave nothing. For *scale*, use
 |---|---|---|
 | `Dockerfile` | GPU image: clones all three runtime repos + installs deps | **Yes** |
 | `entrypoint.sh` | Runtime bootstrap: pulls latest code, then `exec`s the job | **Yes** (baked, runs before the pull) |
+| `with_studies.sh` | Optional command prefix: fetches `aind-dynamic-foraging-bfm-studies` at `STUDIES_REF`, exports `STUDIES_COMMIT`, then `exec`s the job; for jobs that run study code at runtime (dispatcher #179) | No (refreshed with the wrapper) |
 | `build_and_push.sh` | Builds (`linux/amd64`) and pushes via `beaker image create` | n/a |
 | `BUILD_LOG.md` | Registry metadata and dependency rationale for each image build | n/a |
 | `smoke.yaml` | Beaker spec: image sanity check (GPU + config, no W&B) | No |
