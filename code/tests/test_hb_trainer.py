@@ -178,6 +178,82 @@ class TestFit(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_BAYES, "requires the 'bayes' extra (jax, numpyro)")
+class TestHeldoutTwoLevel(unittest.TestCase):
+    """Held-out subjects fitted alone: no population, no training cohort."""
+
+    class _Run:
+        """Records what a W&B run would receive."""
+
+        def __init__(self):
+            """Start with an empty summary."""
+            self.summary, self.logged = {}, []
+
+        def log(self, payload):
+            """Keep logged payloads."""
+            self.logged.append(payload)
+
+    @classmethod
+    def setUpClass(cls):
+        """One tiny two-chain fit, with no training cohort at all."""
+        cls.artifacts = tempfile.TemporaryDirectory()
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        cls.wandb_run = cls._Run()
+        trainer = HBTrainer(
+            estimator="heldout_two_level", num_warmup=30, num_samples=30, num_chains=2,
+            eval_every_n=2, session_draws_per_posterior_draw=4,
+            artifact_dir=cls.artifacts.name, seed=0,
+        )
+        cls.output = trainer.fit(bundle, loggers={"wandb": cls.wandb_run})
+
+    @classmethod
+    def tearDownClass(cls):
+        """Remove the artifact directory."""
+        cls.artifacts.cleanup()
+
+    def test_scores_every_subject_on_the_baseline_split(self):
+        """Two context and two scored sessions each, likelihoods in (0, 1)."""
+        self.assertEqual(self.output["estimator"], "heldout_two_level")
+        per_subject = self.output["heldout_per_subject_matched"]
+        self.assertEqual(sorted(per_subject), ["m0", "m1"])
+        for row in per_subject.values():
+            self.assertEqual((row["n_context"], row["n_scored"]), (2, 2))
+            self.assertTrue(0.0 < row["likelihood"] < 1.0)
+            self.assertTrue(0.0 < row["likelihood_trial_marginal"] < 1.0)
+            self.assertIn("converged", row)
+        self.assertTrue(0.0 < self.output["heldout_likelihood"]["matched"] < 1.0)
+
+    def test_logs_eval_but_never_test_likelihood(self):
+        """For the GRU test_likelihood is zero-shot; with no population there is none here."""
+        summary = self.wandb_run.summary
+        for key in ("heldout/eval_likelihood", "heldout/eval_likelihood_se",
+                    "heldout/eval_likelihood_trial_marginal", "heldout/min_weight_ess",
+                    "hb/max_r_hat", "hb/min_ess_bulk", "hb/n_subjects_converged"):
+            self.assertIn(key, summary)
+        self.assertNotIn("heldout/test_likelihood", summary)
+        self.assertNotIn("heldout_test_likelihood", summary)
+
+    def test_persists_draws_and_scores_per_run(self):
+        """Draws, diagnostics and per-session scores land in this run's own subdirectory."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        draws = np.load(run_dir / "heldout_two_level_draws.npz")
+        self.assertEqual(draws["mu_p"].shape, (60, 2, 5))
+        scores = np.load(run_dir / "heldout_two_level_scores.npz")
+        self.assertIn("session_marginal", scores.files)
+        self.assertIn('"max_r_hat"', (run_dir / "heldout_two_level_fit.json").read_text())
+
+    def test_requires_a_heldout_cohort(self):
+        """Without held-out subjects there is nothing to fit."""
+        bundle = DatasetBundle(raw=_make_frame(), train_set=None, eval_set=None, metadata={})
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, seed=0)
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
+
+@unittest.skipUnless(HAS_BAYES, "requires the 'bayes' extra (jax, numpyro)")
 class TestSessionSitePersistence(unittest.TestCase):
     """The session-sites knob reaches ``save_fit``, not merely the config.
 

@@ -623,6 +623,26 @@ environment.
 
 > Add a dated entry (newest first) whenever you add or change a feature.
 
+### 2026-10-25
+- **`HBTrainer(estimator="heldout_two_level")`: held-out subjects fitted alone (study 13).** No
+  population level and no training cohort: each held-out subject gets a two-level Hattori2019 model
+  under a fixed hyperprior (`FIXED_HYPERPRIOR` in `aind-dynamic-foraging-models`, the same model as
+  `hattori2019_two_level`). It is conditioned on the subject's train sessions and scored on its eval
+  sessions (`eval_every_n`), the per-mouse MLE baseline's split. Runs `num_chains` chains so each
+  subject is gated on its own (study 08's gates, R-hat < 1.01 and bulk ESS ≥ 400). The k sweep is
+  skipped. Logs:
+  - `heldout/eval_likelihood`: the **session-marginal** likelihood, with `_se`.
+  - `heldout/eval_likelihood_trial_marginal`: the score the other estimators log.
+  - `heldout/eval_likelihood_converged_only`, and the weight-ESS summary.
+  - `hb/max_r_hat`, `hb/min_ess_bulk`, `hb/n_subjects_converged`, `hb/divergences`.
+  - Table `heldout/per_subject_two_level`.
+  - **Not** `heldout/test_likelihood`: for the GRU that key is a zero-shot score, and this estimator
+    has none (wrapper#107).
+  New key `session_draws_per_posterior_draw` (default 64) sets the session draws behind each
+  session-marginal. Draws and diagnostics are written to `artifact_dir/<run tag>/` straight after
+  sampling, and per-session scores after scoring. Needs `aind-dynamic-foraging-models` with
+  `fit_heldout_two_level` and `batched_heldout_scores` (foraging-models #78, #79).
+
 ### 2026-10-14
 - **`HBStanTrainer`: the Stan arm of the HB baseline.** `model: hb_hattori_stan` fits the same
   three-level Hattori2019 model as `HBTrainer`, with pystan (the Stan program uses `Phi_approx` for the

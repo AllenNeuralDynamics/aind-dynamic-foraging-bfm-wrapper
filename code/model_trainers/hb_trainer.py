@@ -9,6 +9,10 @@ Two estimators are available. ``two_stage`` fits each subject independently and 
 population distribution over the resulting posteriors; ``one_stage`` infers all three levels
 jointly. The joint fit is the reference the approximation is judged against.
 
+A third, ``heldout_two_level``, has no population level at all: it fits each held-out
+subject alone on its context sessions, under a fixed hyperprior, and never fits the training
+cohort (study 13).
+
 The model itself lives in ``aind-dynamic-foraging-models`` and knows nothing about this
 stack; this module only marshals data, runs the fit, and reports.
 """
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -30,6 +35,11 @@ from base.types import DatasetBundle
 logger = logging.getLogger(__name__)
 
 FEW_SHOT_K = (0, 1, 2, 4, 8)
+
+# Per-subject convergence gates for ``heldout_two_level``: study 08's offline gates
+# (studies/08-hb-vs-gru-heldout/analysis/summarize_hb_posteriors.py), applied per subject.
+GATE_MAX_R_HAT = 1.01
+GATE_MIN_ESS_BULK = 400.0
 
 
 def _extract_subject_sessions(
@@ -206,6 +216,46 @@ def _log_per_subject_table(wandb_run, per_subject):
         logger.warning("HBTrainer: could not log per-subject table: %s", error)
 
 
+def _log_two_level_table(wandb_run, per_subject):
+    """Publish ``heldout_two_level`` per-subject scores and gates as a W&B table."""
+    try:
+        import wandb
+
+        columns = ["subject_id", "likelihood", "likelihood_trial_marginal", "n_context",
+                   "n_scored", "n_trials", "max_r_hat", "min_ess_bulk", "min_weight_ess",
+                   "converged"]
+        table = wandb.Table(columns=columns)
+        for subject, row in sorted(per_subject.items()):
+            table.add_data(subject, *(row[c] for c in columns[1:]))
+        wandb_run.log({"heldout/per_subject_two_level": table})
+    except Exception as error:  # pragma: no cover - never fail a fit over telemetry
+        logger.warning("HBTrainer: could not log per-subject table: %s", error)
+
+
+def _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta):
+    """Persist the held-out posterior draws and per-subject diagnostics.
+
+    The fit is per subject with no population, so there is no ``save_fit`` netCDF to write;
+    the draws are what a later rescoring needs.
+    """
+    import json
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        run_dir / "heldout_two_level_draws.npz",
+        mu_p=np.asarray(samples["mu_p"]), log_sigma=np.asarray(samples["log_sigma"]),
+    )
+    record = {
+        "subject_ids": [str(s) for s in subjects],
+        "max_r_hat": np.asarray(diagnostics["max_r_hat"]).tolist(),
+        "min_ess_bulk": np.asarray(diagnostics["min_ess_bulk"]).tolist(),
+        "divergences": diagnostics["divergences"],
+        **meta,
+    }
+    (run_dir / "heldout_two_level_fit.json").write_text(json.dumps(record, indent=2))
+    logger.info("HBTrainer: wrote heldout_two_level draws to %s", run_dir)
+
+
 def _source_revisions():
     """Git SHAs of the repositories whose code produced a fit.
 
@@ -296,6 +346,7 @@ class HBTrainer(ModelTrainer):
         save_session_sites: bool = True,
         progress_bar: bool = False,
         progress_rate: int | None = None,
+        session_draws_per_posterior_draw: int = 64,
         architecture: Mapping[str, Any] | Any = {},
         output_dir: str = "/results/outputs",
         seed: Optional[int] = None,
@@ -358,6 +409,12 @@ class HBTrainer(ModelTrainer):
             iterations, which is what keeps a captured log readable -- roughly 20 lines for
             a whole fit. Set it only to override that: tqdm writes to stderr, which Beaker
             captures, so a small value here buries the log rather than illuminating it.
+        session_draws_per_posterior_draw : int
+            **Applies to ``estimator="heldout_two_level"`` only.** Fresh session-parameter
+            draws per posterior draw when scoring a held-out session by its session-marginal
+            likelihood. That estimate rests on the few draws that fit the whole session, so
+            it needs far more draws than the trial-marginal; each session's weight ESS is
+            reported so a starved estimate is visible.
         architecture : mapping
             Present for parity with the other trainers; unused.
         output_dir : str
@@ -397,6 +454,7 @@ class HBTrainer(ModelTrainer):
         self.save_session_sites = bool(save_session_sites)
         self.progress_bar = bool(progress_bar)
         self.progress_rate = None if progress_rate is None else int(progress_rate)
+        self.session_draws_per_posterior_draw = int(session_draws_per_posterior_draw)
         self.output_dir = output_dir
 
     def fit(
@@ -432,6 +490,9 @@ class HBTrainer(ModelTrainer):
         num_chains, beta_max = self.num_chains, self.beta_max
         k_values, eval_every_n = self.few_shot_k, self.eval_every_n
         artifact_dir = self.artifact_dir
+
+        if estimator == "heldout_two_level":
+            return self._fit_heldout_two_level(bundle, wandb_run, started)
 
         if bundle.raw is None or len(bundle.raw) == 0:
             raise ValueError("HBTrainer requires bundle.raw with trial-level rows.")
@@ -669,6 +730,150 @@ class HBTrainer(ModelTrainer):
                 logger.exception("Could not generate HB figures; continuing.")
 
         return output
+
+    def _fit_heldout_two_level(self, bundle, wandb_run, started):
+        """Fit each held-out subject alone on its context sessions, then score its eval sessions.
+
+        There is no population level and the training cohort is never fitted: each subject
+        gets a two-level model under ``FIXED_HYPERPRIOR``, conditioned on the sessions the
+        per-mouse MLE baseline fits and scored on the ones it scores (``eval_every_n``). The
+        headline is the session-marginal likelihood; the trial-marginal that the other
+        estimators report is kept beside it. Nothing is written under
+        ``heldout/test_likelihood``: for the GRU that key is a zero-shot score, and with no
+        population this estimator has none.
+        """
+        import jax
+
+        from aind_dynamic_foraging_models.hierarchical_bayes.heldout import (
+            batched_heldout_scores,
+            fit_heldout_two_level,
+            pooled_likelihood,
+        )
+
+        heldout_df = (bundle.extras or {}).get("heldout_raw")
+        if heldout_df is None or len(heldout_df) == 0:
+            raise ValueError(
+                "estimator='heldout_two_level' fits and scores held-out subjects only, so it "
+                "needs bundle.extras['heldout_raw']."
+            )
+        choices, rewards, session_ids = _extract_subject_sessions(heldout_df)
+        subjects, context_indices, score_indices = [], [], []
+        for subject, ids in session_ids.items():
+            if len(ids) < 2:
+                continue
+            train_ids, eval_ids = compute_train_eval_session_ids(ids, self.eval_every_n)
+            index_of = {sid: i for i, sid in enumerate(ids)}
+            subjects.append(subject)
+            context_indices.append([index_of[sid] for sid in train_ids])
+            score_indices.append([index_of[sid] for sid in eval_ids])
+
+        key_fit, key_draw = jax.random.split(jax.random.PRNGKey(int(self.seed or 0)))
+        context_c, context_r, ctx_session_mask, ctx_valid = _pad_context(
+            subjects, choices, rewards, context_indices
+        )
+        samples, diagnostics = fit_heldout_two_level(
+            context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
+            valid_mask=ctx_valid, num_warmup=self.num_warmup, num_samples=self.num_samples,
+            num_chains=self.num_chains, beta_max=self.beta_max, progress_bar=self.progress_bar,
+        )
+        fit_seconds = time.time() - started
+        # Saved before scoring, so a failure there cannot lose the fit. One subdirectory per
+        # run: a sweep's runs share artifact_dir, and the file names are fixed.
+        run_dir = None
+        if self.artifact_dir:
+            run_tag = str(getattr(wandb_run, "id", None)
+                          or f"seed{self.seed}-{uuid.uuid4().hex[:8]}")
+            run_dir = Path(self.artifact_dir) / run_tag
+            _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta={
+                "seed": self.seed, "num_chains": self.num_chains,
+                "num_warmup": self.num_warmup, "num_samples": self.num_samples,
+                "beta_max": self.beta_max, "eval_every_n": self.eval_every_n,
+                "session_draws_per_posterior_draw": self.session_draws_per_posterior_draw,
+                **_source_revisions(),
+            })
+
+        flat = _flatten_for_scoring(subjects, choices, rewards, score_indices)
+        scored = batched_heldout_scores(
+            samples, flat["subject_indices"], flat["choices"], flat["rewards"],
+            valid_mask=flat["valid_mask"], rng_key=key_draw, beta_max=self.beta_max,
+            n_theta_per_draw=self.session_draws_per_posterior_draw,
+        )
+
+        per_subject: Dict[str, Any] = {}
+        converged_rows: List[int] = []
+        for position, subject in enumerate(subjects):
+            rows = flat["rows_by_subject"][position]
+            n_trials = int(np.sum(scored["n_trials"][rows]))
+            converged = bool(
+                diagnostics["max_r_hat"][position] < GATE_MAX_R_HAT
+                and diagnostics["min_ess_bulk"][position] >= GATE_MIN_ESS_BULK
+            )
+            if converged:
+                converged_rows.extend(int(r) for r in rows)
+            per_subject[str(subject)] = {
+                "likelihood": _normalized_likelihood(
+                    float(np.sum(scored["session_marginal"][rows])), n_trials),
+                "likelihood_trial_marginal": _normalized_likelihood(
+                    float(np.sum(scored["trial_marginal"][rows])), n_trials),
+                "n_context": len(context_indices[position]),
+                "n_scored": len(score_indices[position]),
+                "n_trials": n_trials,
+                "max_r_hat": float(diagnostics["max_r_hat"][position]),
+                "min_ess_bulk": float(diagnostics["min_ess_bulk"][position]),
+                "min_weight_ess": float(np.min(scored["weight_ess"][rows])),
+                "converged": converged,
+            }
+
+        likelihood, likelihood_se = pooled_likelihood(
+            scored["session_marginal"], scored["n_trials"], scored["relative_weights"]
+        )
+        trial_marginal, _ = pooled_likelihood(scored["trial_marginal"], scored["n_trials"])
+        converged_only = (
+            pooled_likelihood(scored["session_marginal"][converged_rows],
+                              scored["n_trials"][converged_rows])[0]
+            if converged_rows else None
+        )
+        summary = {
+            "heldout/eval_likelihood": likelihood,
+            "heldout/eval_likelihood_se": likelihood_se,
+            "heldout/eval_likelihood_trial_marginal": trial_marginal,
+            "heldout/eval_likelihood_converged_only": converged_only,
+            "heldout/num_eval_trials": int(np.sum(scored["n_trials"])),
+            "heldout/num_eval_subjects": len(per_subject),
+            "heldout/min_weight_ess": float(np.min(scored["weight_ess"])),
+            "heldout/median_weight_ess": float(np.median(scored["weight_ess"])),
+            "hb/n_subjects_converged": sum(row["converged"] for row in per_subject.values()),
+            "hb/max_r_hat": float(np.max(diagnostics["max_r_hat"])),
+            "hb/min_ess_bulk": float(np.min(diagnostics["min_ess_bulk"])),
+            "hb/divergences": diagnostics["divergences"],
+            "hb/fit_seconds": float(fit_seconds),
+            "hb/estimator": "heldout_two_level",
+        }
+        logger.info(
+            "HBTrainer: heldout_two_level eval likelihood %.5f (se %.5f; trial-marginal %.5f); "
+            "%d/%d subjects pass the gates",
+            likelihood, likelihood_se, trial_marginal, summary["hb/n_subjects_converged"],
+            len(per_subject),
+        )
+        if wandb_run is not None:
+            for key, value in summary.items():
+                if value is not None:
+                    wandb_run.summary[key] = value
+            _log_two_level_table(wandb_run, per_subject)
+        if run_dir is not None:
+            np.savez_compressed(
+                run_dir / "heldout_two_level_scores.npz",
+                subject_indices=np.asarray(flat["subject_indices"]),
+                **{k: np.asarray(v) for k, v in scored.items()},
+            )
+        return {
+            "estimator": "heldout_two_level",
+            "n_subjects": len(subjects),
+            "fit_seconds": fit_seconds,
+            "heldout_likelihood": {"matched": likelihood},
+            "heldout_summary": summary,
+            "heldout_per_subject_matched": per_subject,
+        }
 
     def _fit_population(
         self, estimator, choice_arr, reward_arr, valid_mask, session_mask,
