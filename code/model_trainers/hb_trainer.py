@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -768,7 +769,12 @@ class HBTrainer(ModelTrainer):
             context_indices.append([index_of[sid] for sid in train_ids])
             score_indices.append([index_of[sid] for sid in eval_ids])
 
-        key_fit, key_draw = jax.random.split(jax.random.PRNGKey(int(self.seed or 0)))
+        # Fold the subject set into the key: runs that each fit a different subset of subjects
+        # (data.test_subject_ids) then draw from independent streams even under one seed, so
+        # their Monte Carlo errors pool in quadrature; the same subjects reproduce exactly.
+        subset_tag = zlib.crc32(",".join(sorted(map(str, subjects))).encode()) & 0x7FFFFFFF
+        key_fit, key_draw = jax.random.split(
+            jax.random.fold_in(jax.random.PRNGKey(int(self.seed or 0)), subset_tag))
         context_c, context_r, ctx_session_mask, ctx_valid = _pad_context(
             subjects, choices, rewards, context_indices
         )
@@ -842,12 +848,19 @@ class HBTrainer(ModelTrainer):
                               scored["n_trials"][converged_rows])[0]
             if converged_rows else None
         )
+        n_eval_trials = int(np.sum(scored["n_trials"]))
         summary = {
+            # Totals, so runs that each fit a subset of subjects (data.test_subject_ids) pool
+            # exactly: exp(sum of log_lik_sum / sum of trials), errors in quadrature, since
+            # separate runs share no posterior draws and their keys differ by subject set.
+            "heldout/eval_log_lik_sum": float(np.sum(scored["session_marginal"])),
+            "heldout/eval_log_lik_sum_se": likelihood_se * n_eval_trials / likelihood,
+            "heldout/eval_log_lik_sum_trial_marginal": float(np.sum(scored["trial_marginal"])),
             "heldout/eval_likelihood": likelihood,
             "heldout/eval_likelihood_se": likelihood_se,
             "heldout/eval_likelihood_trial_marginal": trial_marginal,
             "heldout/eval_likelihood_converged_only": converged_only,
-            "heldout/num_eval_trials": int(np.sum(scored["n_trials"])),
+            "heldout/num_eval_trials": n_eval_trials,
             "heldout/num_eval_subjects": len(per_subject),
             "heldout/min_weight_ess": float(np.min(scored["weight_ess"])),
             "heldout/median_weight_ess": float(np.median(scored["weight_ess"])),

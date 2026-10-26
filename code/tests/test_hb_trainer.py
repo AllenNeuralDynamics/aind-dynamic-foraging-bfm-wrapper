@@ -235,6 +235,11 @@ class TestHeldoutTwoLevel(unittest.TestCase):
                     "heldout/n_sessions_pareto_k_fail", "heldout/pareto_k_threshold"):
             self.assertIn(key, summary)
         self.assertNotIn("heldout/test_likelihood", summary)
+        # The totals reproduce the pooled likelihood, so separate runs can be pooled exactly.
+        self.assertAlmostEqual(
+            np.exp(summary["heldout/eval_log_lik_sum"] / summary["heldout/num_eval_trials"]),
+            summary["heldout/eval_likelihood"], places=6)
+        self.assertGreater(summary["heldout/eval_log_lik_sum_se"], 0.0)
         self.assertNotIn("heldout_test_likelihood", summary)
 
     def test_persists_draws_and_scores_per_run(self):
@@ -245,6 +250,25 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         scores = np.load(run_dir / "heldout_two_level_scores.npz")
         self.assertIn("session_marginal", scores.files)
         self.assertIn('"max_r_hat"', (run_dir / "heldout_two_level_fit.json").read_text())
+
+    def test_subject_subsets_get_independent_streams(self):
+        """One seed: the same subject set reproduces exactly; a different set draws afresh.
+
+        The data are identical in all three runs; only the subject label changes, so any
+        difference in the estimate can come only from the random key.
+        """
+        frame = _make_frame(n_subjects=1, n_sessions=4, n_trials=50, seed=7)
+
+        def likelihood(label):
+            bundle = DatasetBundle(raw=None, train_set=None, eval_set=None, metadata={},
+                                   extras={"heldout_raw": frame.assign(subject_id=label)})
+            trainer = HBTrainer(estimator="heldout_two_level", num_warmup=10, num_samples=10,
+                                num_chains=2, session_draws_per_posterior_draw=2, seed=0)
+            return trainer.fit(bundle)["heldout_likelihood"]["matched"]
+
+        first, again, other = likelihood("m0"), likelihood("m0"), likelihood("m1")
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, other)
 
     def test_requires_a_heldout_cohort(self):
         """Without held-out subjects there is nothing to fit."""
