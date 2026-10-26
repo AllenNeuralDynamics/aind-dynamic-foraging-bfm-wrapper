@@ -633,7 +633,9 @@ environment.
   skipped. Logs:
   - `heldout/eval_likelihood`: the **session-marginal** likelihood, with `_se`.
   - `heldout/eval_likelihood_trial_marginal`: the score the other estimators log.
-  - `heldout/eval_likelihood_converged_only`, and the weight-ESS summary.
+  - `heldout/eval_likelihood_converged_only`, the weight-ESS summary, and the number of sessions
+    failing the Pareto k̂ gate (`heldout/n_sessions_pareto_k_fail`, threshold
+    `heldout/pareto_k_threshold`; an unjudged k̂ counts as failing).
   - `hb/max_r_hat`, `hb/min_ess_bulk`, `hb/n_subjects_converged`, `hb/divergences`.
   - Table `heldout/per_subject_two_level`.
   - **Not** `heldout/test_likelihood`: for the GRU that key is a zero-shot score, and this estimator

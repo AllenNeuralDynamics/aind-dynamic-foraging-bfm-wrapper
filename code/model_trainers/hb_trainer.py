@@ -223,7 +223,7 @@ def _log_two_level_table(wandb_run, per_subject):
 
         columns = ["subject_id", "likelihood", "likelihood_trial_marginal", "n_context",
                    "n_scored", "n_trials", "max_r_hat", "min_ess_bulk", "min_weight_ess",
-                   "converged"]
+                   "max_pareto_k", "n_sessions_pareto_k_fail", "converged"]
         table = wandb.Table(columns=columns)
         for subject, row in sorted(per_subject.items()):
             table.add_data(subject, *(row[c] for c in columns[1:]))
@@ -747,6 +747,7 @@ class HBTrainer(ModelTrainer):
         from aind_dynamic_foraging_models.hierarchical_bayes.heldout import (
             batched_heldout_scores,
             fit_heldout_two_level,
+            pareto_k_threshold,
             pooled_likelihood,
         )
 
@@ -799,6 +800,10 @@ class HBTrainer(ModelTrainer):
             n_theta_per_draw=self.session_draws_per_posterior_draw,
         )
 
+        n_draws = int(np.asarray(samples["mu_p"]).shape[0]) * self.session_draws_per_posterior_draw
+        k_threshold = pareto_k_threshold(n_draws)
+        # nan means unjudged, which fails the gate like a high k-hat.
+        k_fails = ~(np.asarray(scored["pareto_k"]) < k_threshold)
         per_subject: Dict[str, Any] = {}
         converged_rows: List[int] = []
         for position, subject in enumerate(subjects):
@@ -821,6 +826,9 @@ class HBTrainer(ModelTrainer):
                 "max_r_hat": float(diagnostics["max_r_hat"][position]),
                 "min_ess_bulk": float(diagnostics["min_ess_bulk"][position]),
                 "min_weight_ess": float(np.min(scored["weight_ess"][rows])),
+                "max_pareto_k": float(np.nanmax(scored["pareto_k"][rows]))
+                if np.any(np.isfinite(scored["pareto_k"][rows])) else float("nan"),
+                "n_sessions_pareto_k_fail": int(np.sum(k_fails[rows])),
                 "converged": converged,
             }
 
@@ -842,6 +850,9 @@ class HBTrainer(ModelTrainer):
             "heldout/num_eval_subjects": len(per_subject),
             "heldout/min_weight_ess": float(np.min(scored["weight_ess"])),
             "heldout/median_weight_ess": float(np.median(scored["weight_ess"])),
+            "heldout/pareto_k_threshold": k_threshold,
+            "heldout/n_sessions_pareto_k_fail": int(np.sum(k_fails)),
+            "heldout/n_sessions": int(len(k_fails)),
             "hb/n_subjects_converged": sum(row["converged"] for row in per_subject.values()),
             "hb/max_r_hat": float(np.max(diagnostics["max_r_hat"])),
             "hb/min_ess_bulk": float(np.min(diagnostics["min_ess_bulk"])),

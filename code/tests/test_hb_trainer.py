@@ -231,7 +231,8 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         summary = self.wandb_run.summary
         for key in ("heldout/eval_likelihood", "heldout/eval_likelihood_se",
                     "heldout/eval_likelihood_trial_marginal", "heldout/min_weight_ess",
-                    "hb/max_r_hat", "hb/min_ess_bulk", "hb/n_subjects_converged"):
+                    "hb/max_r_hat", "hb/min_ess_bulk", "hb/n_subjects_converged",
+                    "heldout/n_sessions_pareto_k_fail", "heldout/pareto_k_threshold"):
             self.assertIn(key, summary)
         self.assertNotIn("heldout/test_likelihood", summary)
         self.assertNotIn("heldout_test_likelihood", summary)
