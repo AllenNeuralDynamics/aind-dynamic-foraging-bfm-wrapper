@@ -235,6 +235,11 @@ class TestHeldoutTwoLevel(unittest.TestCase):
                     "heldout/n_sessions_pareto_k_fail", "heldout/pareto_k_threshold"):
             self.assertIn(key, summary)
         self.assertNotIn("heldout/test_likelihood", summary)
+        # The totals reproduce the pooled likelihood, so separate runs can be pooled exactly.
+        self.assertAlmostEqual(
+            np.exp(summary["heldout/eval_log_lik_sum"] / summary["heldout/num_eval_trials"]),
+            summary["heldout/eval_likelihood"], places=6)
+        self.assertGreater(summary["heldout/eval_log_lik_sum_se"], 0.0)
         self.assertNotIn("heldout_test_likelihood", summary)
 
     def test_persists_draws_and_scores_per_run(self):

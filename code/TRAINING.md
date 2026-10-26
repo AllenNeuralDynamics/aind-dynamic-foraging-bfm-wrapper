@@ -633,6 +633,9 @@ environment.
   skipped. Logs:
   - `heldout/eval_likelihood`: the **session-marginal** likelihood, with `_se`.
   - `heldout/eval_likelihood_trial_marginal`: the score the other estimators log.
+  - `heldout/eval_log_lik_sum` (with `_se`, `_trial_marginal`) and `heldout/num_eval_trials`:
+    totals that pool exactly across runs fitting subject subsets (`data.test_subject_ids`),
+    errors in quadrature since separate runs share no draws.
   - `heldout/eval_likelihood_converged_only`, the weight-ESS summary, and the number of sessions
     failing the Pareto k̂ gate (`heldout/n_sessions_pareto_k_fail`, threshold
     `heldout/pareto_k_threshold`; an unjudged k̂ counts as failing).

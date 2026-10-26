@@ -842,12 +842,19 @@ class HBTrainer(ModelTrainer):
                               scored["n_trials"][converged_rows])[0]
             if converged_rows else None
         )
+        n_eval_trials = int(np.sum(scored["n_trials"]))
         summary = {
+            # Totals, so runs that each fit a subset of subjects (data.test_subject_ids) pool
+            # exactly: exp(sum of log_lik_sum / sum of trials), errors in quadrature, since
+            # separate runs share no posterior draws.
+            "heldout/eval_log_lik_sum": float(np.sum(scored["session_marginal"])),
+            "heldout/eval_log_lik_sum_se": likelihood_se * n_eval_trials / likelihood,
+            "heldout/eval_log_lik_sum_trial_marginal": float(np.sum(scored["trial_marginal"])),
             "heldout/eval_likelihood": likelihood,
             "heldout/eval_likelihood_se": likelihood_se,
             "heldout/eval_likelihood_trial_marginal": trial_marginal,
             "heldout/eval_likelihood_converged_only": converged_only,
-            "heldout/num_eval_trials": int(np.sum(scored["n_trials"])),
+            "heldout/num_eval_trials": n_eval_trials,
             "heldout/num_eval_subjects": len(per_subject),
             "heldout/min_weight_ess": float(np.min(scored["weight_ess"])),
             "heldout/median_weight_ess": float(np.median(scored["weight_ess"])),
