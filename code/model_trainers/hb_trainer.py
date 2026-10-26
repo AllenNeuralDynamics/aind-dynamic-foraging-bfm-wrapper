@@ -826,8 +826,9 @@ class HBTrainer(ModelTrainer):
                 "max_r_hat": float(diagnostics["max_r_hat"][position]),
                 "min_ess_bulk": float(diagnostics["min_ess_bulk"][position]),
                 "min_weight_ess": float(np.min(scored["weight_ess"][rows])),
+                # -inf (identical weights) is a judged pass; nan only if all are unjudged.
                 "max_pareto_k": float(np.nanmax(scored["pareto_k"][rows]))
-                if np.any(np.isfinite(scored["pareto_k"][rows])) else float("nan"),
+                if not np.all(np.isnan(scored["pareto_k"][rows])) else float("nan"),
                 "n_sessions_pareto_k_fail": int(np.sum(k_fails[rows])),
                 "converged": converged,
             }

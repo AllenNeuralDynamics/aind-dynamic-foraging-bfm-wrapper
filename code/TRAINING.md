@@ -643,7 +643,8 @@ environment.
   New key `session_draws_per_posterior_draw` (default 64) sets the session draws behind each
   session-marginal. Draws and diagnostics are written to `artifact_dir/<run tag>/` straight after
   sampling, and per-session scores after scoring. Needs `aind-dynamic-foraging-models` with
-  `fit_heldout_two_level` and `batched_heldout_scores` (foraging-models #78, #79).
+  `fit_heldout_two_level` (foraging-models #79), `batched_heldout_scores` (#78) and its
+  `pareto_k` output with `pareto_k_threshold` (#80).
 
 ### 2026-10-14
 - **`HBStanTrainer`: the Stan arm of the HB baseline.** `model: hb_hattori_stan` fits the same
