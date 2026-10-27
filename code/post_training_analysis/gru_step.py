@@ -82,7 +82,9 @@ class GruStep:
 
         basis: [H, k] orthonormal columns; mean: [H], or [5, H] for conditional replacement —
         rows 0–3 the mean state after each input (index 2·choice + reward of the input just
-        received), row 4 for a session's first step (no previous trial). Returns
+        received), row 4 for a session's first step (no previous trial). Per-input means assume a
+        2-action input (choice ∈ {0, 1}): a 3-action "ignore" input (choice 2) would index rows 4/5
+        and must use a global mean or its own indexing. Returns
         logit_diff [T, B]. With
         ``memory_only`` the logit of each step is read from the intact state and only the state
         carried to the next step is ablated (does the subspace carry information forward?);
