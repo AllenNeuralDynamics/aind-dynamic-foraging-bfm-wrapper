@@ -384,10 +384,15 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
 
     python -m run_hpc data=mice_snapshot_scaling data.ignore_policy=include model=glmhmm
 
-- **Device.** It runs on the CPU, even on a GPU host (`AIND_GLMHMM_DEVICE`, default `cpu`).
-  The E-step is a sequential scan and the M-step is a small Newton solve. Also, the pinned jax
-  0.6.1 stack pairs cuBLAS 12.8 with a cuSOLVER that fails to start on a GPU
-  (`gpusolverDnCreate ... cuSolver internal error`, verified on a V100).
+- **Device.** It runs on the CPU unless `AIND_GLMHMM_DEVICE=gpu` (default `cpu`). The CUDA
+  libraries pip resolves for jax 0.6.1 pair cuBLAS 12.8 with a cuSOLVER from CUDA 12.9, and
+  every GPU linear solve then fails (`gpusolverDnCreate ... cuSolver internal error`). This
+  includes the shared HPC env and the main Beaker image.
+  - The GLM-HMM Beaker image (`beaker/glmhmm/Dockerfile`) pins the solver libraries, so use
+    the GPU there.
+  - On study 14's 4.9M-trial cohort, a K = 10 global fit takes about 1.4–2.6 h on a GPU
+    against 7–8 h on 8 CPU cores.
+  - Per-mouse refits run about twice as fast on the CPU (#111).
 - **Data.** Needs `data.ignore_policy=include` (the trainer refuses `exclude`): ignore is an
   outcome, and every session the 3-way GRU sees is kept. For a mature / non-mature split of the
   score, add `current_stage_actual` to `data.cols_to_retain` (the default list projects it
