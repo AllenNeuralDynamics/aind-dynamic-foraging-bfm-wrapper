@@ -18,6 +18,10 @@ A 3-action head (``include``) steps through them, so they are rows with ``action
 themselves. The ``add_candidate_variables`` history columns are computed over engaged trials
 only (an ignored trial is skipped, not a break) and are NaN on ignored rows.
 
+A run trained with ``data.timing_features`` also carries the current trial's response
+columns (``RESPONSE_COLUMNS``: reaction time, lick counts) on row ``t``; the GRU received
+them on row ``t+1``.
+
 Usage::
 
     from post_training_analysis.gru_trial_states import extract_gru_trial_states
@@ -62,6 +66,12 @@ TASK_STATE_COLUMNS = (
     "bait_right",
 )
 _PASSTHROUGH_COLUMNS = ("trial", "source_ses_idx", "subject_session_index", "subject_index")
+# Current-trial response columns attached by ``utils.trial_timing_features`` when
+# ``data.timing_features.enabled``; absent otherwise. ``reaction_time`` is raw seconds,
+# while ``log_reaction_time`` and ``n_lick_*`` hold the encoded (by default standardized)
+# values, because the encoder overwrites the lick counts in place. The GRU sees them
+# shifted by one trial, and only those the run's config enables.
+RESPONSE_COLUMNS = ("reaction_time", "log_reaction_time", "n_lick_left", "n_lick_right")
 # Per-action columns in action-index order (0 = left, 1 = right, 2 = ignore).
 PROBABILITY_COLUMNS = ("p_model1_left", "p_model1_right", "p_model1_ignore")
 IGNORE = 2
@@ -155,7 +165,10 @@ def build_trial_states_table(
     if "curriculum_name" in out.columns:
         model["session_curriculum_name"] = out["curriculum_name"].astype(str).to_numpy()
     keys = ["ses_idx", "trial_idx", "animal_response"]
-    passthrough = [c for c in (*_PASSTHROUGH_COLUMNS, *extra_columns) if c in out.columns]
+    passthrough = [
+        c for c in dict.fromkeys((*_PASSTHROUGH_COLUMNS, *RESPONSE_COLUMNS, *extra_columns))
+        if c in out.columns
+    ]
     model = pd.concat([out[keys + passthrough].reset_index(drop=True), model], axis=1)
 
     merged = canonical.merge(model, on=["ses_idx", "trial_idx"], how="inner", validate="1:1")
@@ -194,8 +207,11 @@ def _with_ignored_trials(canonical: pd.DataFrame, out: pd.DataFrame) -> pd.DataF
     ignored = out.loc[~engaged, ["ses_idx", "trial_idx", "subject_id", "earned_reward"]].copy()
     for column in ("session_id", "session_idx", "curriculum_name"):
         ignored[column] = ignored["ses_idx"].map(sessions[column])
-    # A session with no engaged trial is absent from ``canonical``; keep its raw subject id.
+    # A session with no engaged trial is absent from ``canonical``; fall back to its raw ids
+    # (``session_id`` as ``_build_canonical_trial_dataframe`` derives it).
     ignored["subject_id"] = ignored["ses_idx"].map(sessions["subject_id"]).fillna(ignored["subject_id"])
+    raw_session_id = out.loc[~engaged, "source_ses_idx"] if "source_ses_idx" in out else ignored["ses_idx"]
+    ignored["session_id"] = ignored["session_id"].fillna(raw_session_id.fillna(ignored["ses_idx"]))
     ignored["action"] = IGNORE
     ignored["reward"] = ignored.pop("earned_reward").astype(float)
     return _sort_trial_dataframe(pd.concat([canonical, ignored[[c for c in ignored if c in columns]]], ignore_index=True))

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from post_training_analysis.gru_trial_states import (
+    RESPONSE_COLUMNS,
     build_trial_states_table,
     pooled_trial_likelihood,
     readout_reconstruction_error,
@@ -95,6 +96,23 @@ class TestGruTrialStates(unittest.TestCase):
             }))
             self.assertLess(readout_reconstruction_error(self.table, params_path), 1e-5)
 
+    def test_response_columns_are_absent_without_timing_features(self) -> None:
+        for column in RESPONSE_COLUMNS:
+            self.assertNotIn(column, self.table.columns)
+
+    def test_response_columns_stay_attached_to_their_own_trial(self) -> None:
+        output_df = self.output_df.assign(
+            reaction_time=0.1 * self.output_df["trial"],
+            log_reaction_time=-self.output_df["trial"].astype(float),
+        )
+        table = build_trial_states_table(output_df, metadata={})
+        source = output_df.set_index(["ses_idx", "trial"])
+        for row in table.itertuples():
+            expected = source.loc[(row.ses_idx, row.trial)]
+            self.assertAlmostEqual(row.reaction_time, expected["reaction_time"])
+            self.assertAlmostEqual(row.log_reaction_time, expected["log_reaction_time"])
+        self.assertNotIn("n_lick_left", table.columns)
+
 
 class TestGruTrialStatesThreeAction(unittest.TestCase):
     """``ignore_policy=include``: the GRU steps through the ignored trial, so the table keeps it."""
@@ -121,6 +139,15 @@ class TestGruTrialStatesThreeAction(unittest.TestCase):
         self.assertTrue(np.isnan(row.prev_action))
         probs = self.table[["p_model1_left", "p_model1_right", "p_model1_ignore"]].sum(axis=1)
         np.testing.assert_allclose(probs, 1.0, rtol=1e-6)
+
+    def test_session_with_only_ignored_trials_keeps_its_ids(self) -> None:
+        output_df = _output_df(READOUT_W3, READOUT_B3)
+        output_df.loc[output_df["ses_idx"] == "s2", "animal_response"] = 2
+        table = build_trial_states_table(output_df, metadata={})
+        s2 = table[table["ses_idx"] == "s2"]
+        self.assertEqual(len(s2), 4)
+        self.assertEqual(set(s2["session_id"]), {"s2"})
+        self.assertEqual(set(s2["subject_id"]), {"m2"})
 
     def test_engaged_history_skips_the_ignored_trial(self) -> None:
         # Long enough to clear add_candidate_variables' 10-trial history warm-up.
