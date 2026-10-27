@@ -433,6 +433,7 @@ class GLMHMMTrainer(ModelTrainer):
                 wandb_run.summary[name] = value
             self._log_per_subject_table(wandb_run, refits)
         self._write_artifacts(model, global_fit, restarts, refits, summary)
+        self._log_output_artifact(wandb_run)
         return summary
 
     def _score_heldout(self, model, global_params, heldout_df, heldout_meta, summary):
@@ -519,6 +520,39 @@ class GLMHMMTrainer(ModelTrainer):
         except Exception:  # pragma: no cover - W&B availability
             logger.exception("Could not log the per-subject table; continuing.")
 
+    def _config(self):
+        """The settings that define this fit, as recorded in fit.json and the W&B artifact."""
+        return {
+            k: getattr(self, k) for k in (
+                "num_states", "emission", "design", "n_lags", "prior_sigma_global",
+                "transition_alpha_global", "prior_sigma_subject", "transition_alpha_subject",
+                "stickiness", "num_restarts", "init_noise", "em_tol", "max_em_iters",
+                "bucket_size", "num_newton_steps", "seed",
+            )
+        }
+
+    def _log_output_artifact(self, wandb_run):
+        """Upload ``output_dir/glmhmm`` to W&B, so the fit outlives this filesystem.
+
+        As the GRU's ``gru-output-<run id>`` and the HB trainer's posterior artifact. The
+        files sit outside ``wandb_run.dir`` (on Beaker, under ``/results``), so without this
+        the parameters and per-trial posteriors are lost when local results are cleaned up.
+        A failed upload is logged and never fails the fit: the scores are already on W&B.
+        """
+        folder = self.output_dir / "glmhmm"
+        if wandb_run is None or not folder.is_dir():
+            return
+        try:
+            import wandb
+
+            name = f"glmhmm-output-{getattr(wandb_run, 'id', None) or 'latest'}"
+            artifact = wandb.Artifact(name, type="glmhmm-output", metadata=self._config())
+            artifact.add_dir(str(folder))
+            wandb_run.log_artifact(artifact)
+            logger.info("GLMHMMTrainer: logged artifact %s", name)
+        except Exception as error:  # never fail a finished fit over telemetry
+            logger.warning("GLMHMMTrainer: could not log the output artifact: %s", error)
+
     def _write_artifacts(self, model, global_fit, restarts, refits, summary):
         """Parameters, per-subject scores and (optionally) per-trial outputs on disk."""
         from model_trainers.hb_trainer import _source_revisions
@@ -526,14 +560,7 @@ class GLMHMMTrainer(ModelTrainer):
         out = self.output_dir / "glmhmm"
         out.mkdir(parents=True, exist_ok=True)
         record = {
-            "config": {
-                k: getattr(self, k) for k in (
-                    "num_states", "emission", "design", "n_lags", "prior_sigma_global",
-                    "transition_alpha_global", "prior_sigma_subject",
-                    "transition_alpha_subject", "stickiness", "num_restarts", "init_noise",
-                    "em_tol", "max_em_iters", "bucket_size", "num_newton_steps", "seed",
-                )
-            },
+            "config": self._config(),
             "summary": summary,
             "global": _params_to_lists(global_fit.params),
             "global_log_joint_trace": np.asarray(global_fit.log_joint).tolist(),
