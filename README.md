@@ -77,7 +77,7 @@ The SLURM scripts activate `dynamic-foraging-bfm-{cpu,gpu}`, falling back to the
 
 ## Entry points
 
-All are run as `python <file>` from `code/` — the package declares no console scripts.
+All are run as `python <file>` or `python -m <module>` from `code/` — the package declares no console scripts.
 
 | File | What it is |
 |---|---|
