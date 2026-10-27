@@ -80,6 +80,11 @@ These are **not the same knob.** The *"Skipping held-out evaluation … seen-sub
 personalization only"* log line refers to the **first** (per-checkpoint eval); the
 second still runs and produces `heldout/final/eval_likelihood`. Full detail in §8.
 
+Both switches apply to the neural models (`gru`, `disrnn`) only. `hb` and `glmhmm` score
+held-out subjects inside `fit()`, from the cohort the runner loads into
+`bundle.extras["heldout_raw"]`, so they log `heldout/*` regardless of
+`auto_heldout_finetune` (§5).
+
 - **Held-out-mouse likelihood is the correct figure of merit** for generalization
   questions; within-subject `checkpoint/eval_likelihood` **saturates** (~0.72–0.75
   across model sizes) and cannot discriminate. Read `heldout/final/eval_likelihood`.
@@ -308,6 +313,7 @@ scores the complete suffix.
 | `gru` | `model_trainers.gru_trainer.GruTrainer` | GRU baseline; `num_layers` must be 1 |
 | `disrnn` | `model_trainers.disrnn_trainer.DisrnnTrainer` | Disentangled RNN with information-bottleneck penalties + warmup phase |
 | `baseline_rl` | `model_trainers.baseline_rl_trainer.BaselineRLTrainer` | Classic RL agents (e.g. `ForagerQLearning`) fit by differential evolution |
+| `glmhmm` | `model_trainers.glmhmm_trainer.GLMHMMTrainer` | GLM-HMM over left/right/ignore (Ashwood et al. 2022): global fit, then per-subject MAP refits; needs `ignore_policy=include` |
 
 ### Shared base class
 `GruTrainer` and `DisrnnTrainer` both subclass **`BaseMultisubjectTrainer`**
@@ -370,6 +376,49 @@ evolution — **one agent fit per subject**, independently (no shared model/embe
   (parity with the NN models) and writing artifacts under `outputs/heldout_test/`.
   This replaces the older transfer-based held-out eval (apply trained params to
   held-out), which is retired from the run path.
+
+### glmhmm specifics
+An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
+`aind-dynamic-foraging-models` `glm_hmm`; install that package with its `[glmhmm]` extra
+(dynamax plus one pinned `tfp-nightly`; the Beaker image installs `[bayes,glmhmm]`).
+
+    python -m run_hpc data=mice_snapshot_scaling data.ignore_policy=include model=glmhmm
+
+- **Data.** Needs `data.ignore_policy=include` (the trainer refuses `exclude`): ignore is an
+  outcome, and every session the 3-way GRU sees is kept. For a mature / non-mature split of the
+  score, add `current_stage_actual` to `data.cols_to_retain` (the default list projects it
+  out; the trainer warns when it is missing).
+- **Emissions** (`model.emission`): `hurdle` (per state, an engagement GLM on unsigned history
+  times a side GLM on signed history) or `reference` (per state, one multinomial GLM with ignore
+  as the zero logit). The history regressors are RewC/UnrC lags (signed) and Ignored/Rewarded
+  lags (unsigned), `model.n_lags` each, plus a bias.
+- **Protocol** (every score is the forward filter's one-step predictive):
+  1. Global fit on the training cohort's **train** sessions (`metadata["train_session_ids"]`),
+     with prior `prior_sigma_global` / `transition_alpha_global`. K = 1 runs first; K > 1 starts
+     from its weights plus `init_noise`, over `num_restarts` starts. Logged as `glmhmm/global/*`.
+  2. Zero-shot: the global fit scores each held-out subject's eval sessions →
+     `heldout/zero_shot/*`. These are the same trials as the matched score. It is **not**
+     `heldout/test_likelihood`: the GRU fills that key from every held-out session, so one key
+     would carry two trial sets.
+  3. Matched: a MAP refit per held-out subject (`prior_sigma_subject`,
+     `transition_alpha_subject`), started from the global fit, on its train sessions; its eval
+     sessions are scored. Logged as `heldout/eval_likelihood`, the GRU's
+     `heldout/final/{eval_likelihood, eval_likelihood_LR_engaged, eval_likelihood_engage,
+     engage_ignore_*}`, the pooling pair `heldout/eval_log_lik_sum` and
+     `heldout/num_eval_trials`, `heldout/final/*_{mature,nonmature}`, and the
+     `heldout/per_subject` table. The split is the held-out loader's own
+     (`bundle.extras["heldout_metadata"]`).
+  4. K selection (`select_on_train_subjects`): the same refit protocol on the training cohort →
+     `glmhmm/select/*`. Never the held-out subjects, and never the global fit's likelihood.
+
+  The scores go through `rnn_utils` and `gru_trainer._threeway_likelihood_decomposition`, so
+  each key is the GRU's formula.
+- **Artifacts** (`output_dir/glmhmm/`):
+  - `fit.json`: config, summary, global and per-subject parameters, the EM trace, and source SHAs;
+  - `heldout_per_subject.csv`;
+  - `heldout_trials.parquet` (with `save_posteriors`): per-trial predictive probabilities,
+    filtered and smoothed posteriors and Viterbi paths, keyed by (subject_id, ses_idx, trial),
+    with the split and stage.
 
 ---
 
@@ -622,6 +671,20 @@ environment.
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change a feature.
+
+### 2026-10-27
+- **`GLMHMMTrainer` (`model.type: glmhmm`): GLM-HMM baseline over left/right/ignore (study 14).**
+  Global fit on the training cohort's train sessions, then per-subject MAP refits scored on eval
+  sessions, through the GRU's metric code. Logs `heldout/eval_likelihood` and `heldout/final/*`
+  (matched), `heldout/zero_shot/*` (zero-shot, the same trials) and `glmhmm/select/*` (the
+  K-selection score from training-cohort refits). See §5 "glmhmm specifics". Needs
+  `aind-dynamic-foraging-models[glmhmm]` (foraging-models #81) and `data.ignore_policy=include`.
+- **Runner: the held-out cohort never inherits training `subject_ids`.** The held-out loader now
+  always sets `subject_ids` (None unless `data.test_subject_ids` picks a subset). Explicit ids
+  bypass `split="heldout"`, so a run that chose its training mice with `data.subject_ids` used
+  to score those same mice under `heldout/*`. This also affected `hb` and `baseline_rl`, which
+  share the helper. `glmhmm` also receives the held-out loader's metadata
+  (`bundle.extras["heldout_metadata"]`) for its train/eval split.
 
 ### 2026-10-25
 - **`HBTrainer(estimator="heldout_two_level")`: held-out subjects fitted alone (study 13).** No

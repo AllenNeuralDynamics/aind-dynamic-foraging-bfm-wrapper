@@ -9,7 +9,10 @@ Protocol (Ashwood et al.'s global-then-individual recipe, aligned with the GRU's
 1. **Global fit** on the training cohort's *train* sessions only -- what the GRU trains on.
    K = 1 is fitted first (convex); K > 1 starts from its weights plus noise, with restarts.
 2. **Zero-shot**: held-out subjects' eval sessions scored with the global parameters ->
-   ``heldout/test_likelihood`` (the GRU's zero-shot key).
+   ``heldout/zero_shot/*``: the same trials as the matched score, so the pair shows what the
+   per-subject refit buys. Deliberately *not* ``heldout/test_likelihood``: the GRU fills that
+   key from every held-out session, and only on its non-multisubject path, so one key would
+   carry two trial sets (study 13 declined it for the same reason).
 3. **Matched**: each held-out subject refitted (MAP, subject prior) on its train sessions,
    starting from the global parameters; its eval sessions scored -> ``heldout/eval_likelihood``
    and the ``heldout/final/*`` three-way decomposition that study 02 reads for the GRU.
@@ -320,6 +323,9 @@ class GLMHMMTrainer(ModelTrainer):
         for subject, train_records in by_subject_train.items():
             eval_records = by_subject_eval.get(subject, [])
             if not eval_records:
+                # Never drop a subject silently: the comparators score every subject.
+                logger.warning("GLMHMMTrainer: subject %s has no eval sessions; not scored.",
+                               subject)
                 continue
             fit = fit_em(model, global_params, props, self._buckets(train_records), prior,
                          self.max_em_iters, self.em_tol)
@@ -439,7 +445,6 @@ class GLMHMMTrainer(ModelTrainer):
 
         zero_shot_lp = predictive_log_probs(model, global_params, self._buckets(evals))
         zero_shot = score_sessions(evals, [zero_shot_lp[i] for i in range(len(evals))])
-        summary["heldout/test_likelihood"] = zero_shot.get("eval_likelihood")
         summary.update({f"heldout/zero_shot/{k}": v for k, v in zero_shot.items()})
 
         refits = self._refit_subjects(model, global_params, _by_subject(train),

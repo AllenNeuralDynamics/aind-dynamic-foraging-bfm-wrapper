@@ -172,7 +172,7 @@ class TestFit(unittest.TestCase):
             run = self._Run()
             summary = self._trainer(out).fit(self._bundle(), loggers={"wandb": run})
             for key in (
-                "heldout/eval_likelihood", "heldout/test_likelihood",
+                "heldout/eval_likelihood", "heldout/zero_shot/eval_likelihood",
                 "heldout/final/eval_likelihood", "heldout/final/eval_likelihood_LR_engaged",
                 "heldout/final/eval_likelihood_engage", "heldout/final/engage_ignore_pr_auc",
                 "heldout/eval_log_lik_sum", "heldout/num_eval_trials",
@@ -182,8 +182,12 @@ class TestFit(unittest.TestCase):
             ):
                 self.assertIn(key, summary)
                 self.assertIn(key, run.summary)
-            for key in ("heldout/eval_likelihood", "heldout/test_likelihood"):
+            for key in ("heldout/eval_likelihood", "heldout/zero_shot/eval_likelihood"):
                 self.assertTrue(1 / 3 < summary[key] < 1, (key, summary[key]))
+            # The GRU's zero-shot key covers every held-out session; ours covers eval only.
+            self.assertNotIn("heldout/test_likelihood", summary)
+            self.assertEqual(summary["heldout/zero_shot/num_eval_trials"],
+                             summary["heldout/num_eval_trials"])
             # Matched scores the held-out cohort's eval (odd) sessions: 2 subjects x 2 x 80.
             self.assertEqual(summary["heldout/num_eval_trials"], 2 * 2 * 80)
             self.assertEqual(summary["heldout/num_eval_subjects"], 2)
