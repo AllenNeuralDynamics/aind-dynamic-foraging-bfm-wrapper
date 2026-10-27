@@ -1,0 +1,10 @@
+# CUDA libraries for the GLM-HMM image, passed to every pip install in beaker/glmhmm/Dockerfile.
+#
+# jax-cuda12-plugin 0.6.1 caps cuBLAS below 12.9 but not cuSOLVER, so pip pairs cuSOLVER 11.7.5
+# (CUDA 12.9) with cuBLAS 12.8, and every GPU linear solve then fails with
+# "gpusolverDnCreate ... cuSolver internal error". Holding cuSOLVER and its two dependencies to
+# the CUDA 12.8 family fixes it. Everything else resolves as in the main image.
+# Verified 2026-10-27 on V100, A100 and L40S (wrapper issue #111).
+nvidia-cusolver-cu12==11.7.3.90
+nvidia-cusparse-cu12==12.5.8.93
+nvidia-nvjitlink-cu12==12.8.93
