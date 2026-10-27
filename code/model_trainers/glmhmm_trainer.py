@@ -456,7 +456,13 @@ class GLMHMMTrainer(ModelTrainer):
         summary.update({f"heldout/final/{k}": v for k, v in matched.items()})
         train_score = score_sessions(*self._pooled(refits, "train"))
         summary["heldout/train_likelihood"] = train_score.get("eval_likelihood")
-        if records and records[0]["stage"] is not None:
+        if records and records[0]["stage"] is None:
+            logger.warning(
+                "GLMHMMTrainer: no %s column, so no mature/non-mature split of the held-out "
+                "score. Add it to data.cols_to_retain (the default list projects it out).",
+                STAGE_COLUMN,
+            )
+        elif records:
             for name, mask_fn in _stage_masks().items():
                 by_stage = score_sessions(records, log_probs, mask_fn)
                 for key in ("eval_likelihood", "eval_likelihood_LR_engaged", "num_eval_trials"):

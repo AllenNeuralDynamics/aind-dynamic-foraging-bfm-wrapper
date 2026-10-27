@@ -68,8 +68,13 @@ def _baseline_rl_skip_train_fit(hydra_config) -> bool:
 
 
 def _baseline_rl_heldout_loader_kwargs(data_cfg) -> dict:
-    """Build held-out loader kwargs, honoring explicit held-out subject subsets."""
-    kwargs = {"split": "heldout", "multisubject": True}
+    """Build held-out loader kwargs, honoring explicit held-out subject subsets.
+
+    ``subject_ids`` is always set. Explicit ids bypass ``split="heldout"`` in the loader, so
+    inheriting a training-cohort ``data.subject_ids`` would score seen subjects as held-out;
+    ``None`` restores the reserved held-out cohort unless ``test_subject_ids`` picks a subset.
+    """
+    kwargs = {"split": "heldout", "multisubject": True, "subject_ids": None}
     test_subject_ids = getattr(data_cfg, "test_subject_ids", None)
     if test_subject_ids is not None:
         kwargs["subject_ids"] = list(test_subject_ids)
@@ -189,7 +194,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
             "subjects directly under heldout/*."
         )
         heldout_loader_kwargs = _baseline_rl_heldout_loader_kwargs(data_cfg)
-        if "subject_ids" in heldout_loader_kwargs:
+        if heldout_loader_kwargs.get("subject_ids") is not None:
             logger.info(
                 "Baseline RL held-out subject override: %s",
                 heldout_loader_kwargs["subject_ids"],
@@ -357,7 +362,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
         heldout_summary = None
         try:
             heldout_loader_kwargs = _baseline_rl_heldout_loader_kwargs(data_cfg)
-            if "subject_ids" in heldout_loader_kwargs:
+            if heldout_loader_kwargs.get("subject_ids") is not None:
                 logger.info(
                     "Baseline RL held-out subject override: %s",
                     heldout_loader_kwargs["subject_ids"],

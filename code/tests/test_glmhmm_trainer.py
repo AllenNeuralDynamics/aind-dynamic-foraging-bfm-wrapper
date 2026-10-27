@@ -250,6 +250,38 @@ class TestRunnerWiring(unittest.TestCase):
             type="glmhmm", architecture=SimpleNamespace(multisubject=True)))
         self.assertTrue(_is_multisubject_personalized_run(cfg))
 
+    def test_heldout_loader_never_inherits_training_subject_ids(self):
+        """Explicit training ids are cleared; an explicit held-out subset is honoured."""
+        from types import SimpleNamespace
+
+        from training_runner import _baseline_rl_heldout_loader_kwargs
+
+        training_only = SimpleNamespace(subject_ids=["m0", "m1"], test_subject_ids=None)
+        kwargs = _baseline_rl_heldout_loader_kwargs(training_only)
+        self.assertIn("subject_ids", kwargs)
+        self.assertIsNone(kwargs["subject_ids"])
+        self.assertEqual(kwargs["split"], "heldout")
+        subset = SimpleNamespace(subject_ids=["m0"], test_subject_ids=["h0", "h1"])
+        self.assertEqual(_baseline_rl_heldout_loader_kwargs(subset)["subject_ids"], ["h0", "h1"])
+
+    def test_missing_stage_column_warns_and_omits_the_split(self):
+        """Without the stage column the split is absent and a warning says why."""
+        if not HAS_GLMHMM:
+            self.skipTest("needs aind-dynamic-foraging-models[glmhmm]")
+        train = _make_frame(("m0", "m1"), stage=False)
+        heldout = _make_frame(("h0",), seed=1, stage=False)
+        bundle = DatasetBundle(raw=train, train_set=None, eval_set=None,
+                               metadata=_split(train),
+                               extras={"heldout_raw": heldout,
+                                       "heldout_metadata": _split(heldout)})
+        with tempfile.TemporaryDirectory() as out:
+            trainer = GLMHMMTrainer(num_states=1, n_lags=2, max_em_iters=10, output_dir=out,
+                                    select_on_train_subjects=False, save_posteriors=False)
+            with self.assertLogs("model_trainers.glmhmm_trainer", level="WARNING") as logs:
+                summary = trainer.fit(bundle)
+        self.assertTrue(any("current_stage_actual" in line for line in logs.output))
+        self.assertNotIn("heldout/final/eval_likelihood_mature", summary)
+
 
 if __name__ == "__main__":
     unittest.main()
