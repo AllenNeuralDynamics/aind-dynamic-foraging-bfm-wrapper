@@ -19,12 +19,13 @@
 # enough — Beaker nodes provide the GPU driver.
 #
 # The models package is installed with its [bayes] extra, which adds numpyro, arviz,
-# xarray and h5netcdf for the hierarchical Bayesian baseline.
+# xarray and h5netcdf for the hierarchical Bayesian baseline, and its [glmhmm] extra, which
+# adds dynamax and one pinned tfp-nightly build for the GLM-HMM baseline.
 #
-# FORAGING_MODELS_REF must point at a ref that HAS that extra. pip does not fail on an
+# FORAGING_MODELS_REF must point at a ref that HAS both extras. pip does not fail on an
 # unknown extra -- it exits 0 and installs without it -- so building against a ref where
-# [bayes] is absent yields an image that looks fine and dies on `import numpyro` at job
-# time. Build only from a ref where the extra exists.
+# [bayes] or [glmhmm] is absent yields an image that looks fine and dies on `import numpyro`
+# or `import dynamax` at job time. Build only from a ref where the extras exist.
 #
 # jax comes from the wrapper's [gpu] extra and is pinned at 0.6.1 there; the models
 # package caps numpyro below 0.20 to stay compatible, since 0.20+ requires jax >= 0.7.
@@ -79,7 +80,7 @@ RUN clone_ref() { \
     clone_ref "$GH_ORG/aind-dynamic-foraging-bfm-wrapper.git" \
       /workspace/aind-dynamic-foraging-bfm-wrapper "$WRAPPER_REF" && \
     pip install --no-cache-dir -e "/workspace/aind-dynamic-foraging-bfm-wrapper[gpu]" && \
-    pip install --no-cache-dir -e "/workspace/aind-dynamic-foraging-models[bayes]"
+    pip install --no-cache-dir -e "/workspace/aind-dynamic-foraging-models[bayes,glmhmm]"
 
 WORKDIR /workspace/aind-dynamic-foraging-bfm-wrapper/code
 ENV PYTHONPATH=/workspace/aind-dynamic-foraging-bfm-wrapper/code

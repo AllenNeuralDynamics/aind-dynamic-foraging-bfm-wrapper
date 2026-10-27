@@ -40,7 +40,7 @@ def _is_multisubject_personalized_run(hydra_config) -> bool:
     model_type = getattr(hydra_config.model, "type", None)
     architecture_cfg = getattr(hydra_config.model, "architecture", None)
     return bool(
-        model_type in {"disrnn", "gru", "baseline_rl", "hb"}
+        model_type in {"disrnn", "gru", "baseline_rl", "hb", "glmhmm"}
         and architecture_cfg is not None
         and getattr(architecture_cfg, "multisubject", False)
     )
@@ -68,8 +68,13 @@ def _baseline_rl_skip_train_fit(hydra_config) -> bool:
 
 
 def _baseline_rl_heldout_loader_kwargs(data_cfg) -> dict:
-    """Build held-out loader kwargs, honoring explicit held-out subject subsets."""
-    kwargs = {"split": "heldout", "multisubject": True}
+    """Build held-out loader kwargs, honoring explicit held-out subject subsets.
+
+    ``subject_ids`` is always set. Explicit ids bypass ``split="heldout"`` in the loader, so
+    inheriting a training-cohort ``data.subject_ids`` would score seen subjects as held-out;
+    ``None`` restores the reserved held-out cohort unless ``test_subject_ids`` picks a subset.
+    """
+    kwargs = {"split": "heldout", "multisubject": True, "subject_ids": None}
     test_subject_ids = getattr(data_cfg, "test_subject_ids", None)
     if test_subject_ids is not None:
         kwargs["subject_ids"] = list(test_subject_ids)
@@ -189,7 +194,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
             "subjects directly under heldout/*."
         )
         heldout_loader_kwargs = _baseline_rl_heldout_loader_kwargs(data_cfg)
-        if "subject_ids" in heldout_loader_kwargs:
+        if heldout_loader_kwargs.get("subject_ids") is not None:
             logger.info(
                 "Baseline RL held-out subject override: %s",
                 heldout_loader_kwargs["subject_ids"],
@@ -308,17 +313,21 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
             str(model_type).upper(),
         )
 
-    # The hierarchical Bayesian trainer scores held-out subjects itself, and needs their
-    # trials to come from the same loader as the training split -- otherwise the two are
-    # filtered independently and the comparison against the neural models is void.
-    if model_type == "hb" and heldout_cfg.enabled:
+    # The hierarchical Bayesian and GLM-HMM trainers score held-out subjects themselves, and
+    # need their trials to come from the same loader as the training split -- otherwise the
+    # two are filtered independently and the comparison against the RNN models is void.
+    # The GLM-HMM also takes the held-out loader's train/eval session split from its metadata,
+    # so it conditions on and scores exactly the sessions the GRU fine-tune does.
+    if model_type in {"hb", "glmhmm"} and heldout_cfg.enabled:
         heldout_loader = instantiate(
             hydra_config.data, **_baseline_rl_heldout_loader_kwargs(data_cfg)
         )
         hb_heldout_bundle = heldout_loader.load()
         dataset_bundle.extras["heldout_raw"] = hb_heldout_bundle.raw
+        dataset_bundle.extras["heldout_metadata"] = hb_heldout_bundle.metadata
         logger.info(
-            "HB held-out cohort loaded from the same loader: %s",
+            "%s held-out cohort loaded from the same loader: %s",
+            str(model_type).upper(),
             hb_heldout_bundle.metadata,
         )
 
@@ -353,7 +362,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
         heldout_summary = None
         try:
             heldout_loader_kwargs = _baseline_rl_heldout_loader_kwargs(data_cfg)
-            if "subject_ids" in heldout_loader_kwargs:
+            if heldout_loader_kwargs.get("subject_ids") is not None:
                 logger.info(
                     "Baseline RL held-out subject override: %s",
                     heldout_loader_kwargs["subject_ids"],
@@ -598,7 +607,9 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
                 }
             if isinstance(output, dict):
                 output["heldout_finetune"] = auto_summary
-        else:
+        elif model_type in {"disrnn", "gru"}:
+            # hb and glmhmm score held-out subjects inside fit(); this note is only true of
+            # the RNN models (gru, disrnn).
             logger.info(
                 "Skipping end-of-training held-out fine-tune for multisubject %s: "
                 "auto_heldout_finetune.enabled is FALSE (this run logs seen-subject "
