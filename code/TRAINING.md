@@ -384,6 +384,10 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
 
     python -m run_hpc data=mice_snapshot_scaling data.ignore_policy=include model=glmhmm
 
+- **Device.** It runs on the CPU, even on a GPU host (`AIND_GLMHMM_DEVICE`, default `cpu`).
+  The E-step is a sequential scan and the M-step is a small Newton solve. Also, the pinned jax
+  0.6.1 stack pairs cuBLAS 12.8 with a cuSOLVER that fails to start on a GPU
+  (`gpusolverDnCreate ... cuSolver internal error`, verified on a V100).
 - **Data.** Needs `data.ignore_policy=include` (the trainer refuses `exclude`): ignore is an
   outcome, and every session the 3-way GRU sees is kept. For a mature / non-mature split of the
   score, add `current_stage_actual` to `data.cols_to_retain` (the default list projects it

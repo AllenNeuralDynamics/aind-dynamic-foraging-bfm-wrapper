@@ -231,6 +231,23 @@ class TestFit(unittest.TestCase):
             self.assertTrue(1 / 3 < summary["heldout/eval_likelihood"] < 1)
             self.assertNotIn("glmhmm/select/eval_likelihood", summary)
 
+    def test_a_failed_parquet_write_keeps_scores_and_fit_json(self):
+        """No parquet engine: W&B still gets every score, and fit.json is written."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as out:
+            run = self._Run()
+            with mock.patch.object(pd.DataFrame, "to_parquet",
+                                   side_effect=ImportError("no parquet engine")):
+                with self.assertLogs("model_trainers.glmhmm_trainer", level="ERROR"):
+                    summary = self._trainer(out, num_states=1).fit(self._bundle(),
+                                                                   loggers={"wandb": run})
+            self.assertIn("heldout/eval_likelihood", run.summary)
+            self.assertEqual(run.summary["heldout/eval_likelihood"],
+                             summary["heldout/eval_likelihood"])
+            self.assertTrue((Path(out) / "glmhmm" / "fit.json").exists())
+            self.assertFalse((Path(out) / "glmhmm" / "heldout_trials.parquet").exists())
+
     def test_requires_ignores_included(self):
         """A two-way data config is refused: the model has an ignore outcome."""
         with tempfile.TemporaryDirectory() as out:

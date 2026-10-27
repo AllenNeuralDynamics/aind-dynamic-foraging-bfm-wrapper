@@ -427,11 +427,12 @@ class GLMHMMTrainer(ModelTrainer):
                                          summary)
 
         summary["glmhmm/fit_seconds"] = float(time.time() - started)
-        self._write_artifacts(model, global_fit, restarts, refits, summary)
+        # Metrics first: an artifact that fails to write must not cost the run its scores.
         if wandb_run is not None:
             for name, value in summary.items():
                 wandb_run.summary[name] = value
             self._log_per_subject_table(wandb_run, refits)
+        self._write_artifacts(model, global_fit, restarts, refits, summary)
         return summary
 
     def _score_heldout(self, model, global_params, heldout_df, heldout_meta, summary):
@@ -544,7 +545,11 @@ class GLMHMMTrainer(ModelTrainer):
         if rows:
             pd.DataFrame(rows).to_csv(out / "heldout_per_subject.csv", index=False)
         if self.save_posteriors and refits:
-            self._write_posteriors(model, refits, out)
+            try:
+                self._write_posteriors(model, refits, out)
+            except Exception:  # e.g. no parquet engine in the environment
+                logger.exception("GLMHMMTrainer: could not write heldout_trials.parquet; "
+                                 "the fit, scores and fit.json are unaffected.")
         logger.info("GLMHMMTrainer: wrote artifacts to %s", out)
 
     def _write_posteriors(self, model, refits, out):
