@@ -13,7 +13,12 @@
 # needed):
 #
 #   bash beaker/build_and_push.sh --dockerfile beaker/glmhmm/Dockerfile \
-#     --name dynamic-foraging-bfm-glmhmm-<YYYYMMDD> --ref <full SHA or main>
+#     --name dynamic-foraging-bfm-glmhmm-<YYYYMMDD> \
+#     --wrapper-ref <wrapper SHA> --dispatcher-ref <dispatcher SHA> \
+#     --foraging-models-ref <models SHA>
+#
+# Each repository needs its own SHA: --ref sets all three to one value, which suits only a
+# shared branch name (--ref main).
 #
 # FORAGING_MODELS_REF must have the [glmhmm] extra, and WRAPPER_REF must have GLMHMMTrainer.
 # pip does not fail on an unknown extra: it exits 0 without it, and the image then dies on

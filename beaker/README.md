@@ -247,11 +247,15 @@ The GLM-HMM image is a second image with its own name, built the same way:
 
 ```bash
 bash beaker/build_and_push.sh --dockerfile beaker/glmhmm/Dockerfile \
-  --name dynamic-foraging-bfm-glmhmm-<YYYYMMDD> --ref <full SHA>
+  --name dynamic-foraging-bfm-glmhmm-<YYYYMMDD> \
+  --wrapper-ref <wrapper SHA> --dispatcher-ref <dispatcher SHA> \
+  --foraging-models-ref <models SHA>
 beaker experiment create -w ai1/aind-dynamic-foraging-foundation-model beaker/glmhmm/smoke.yaml
 ```
 
-Set the image name in `glmhmm/smoke.yaml` first, and look for `SMOKE OK` in both of its tasks.
+Pin each repository to its own SHA. `--ref` sets all three refs to one value, so it suits a
+shared branch name (`--ref main`) but not a commit. Set the image name in `glmhmm/smoke.yaml`
+first, and look for `SMOKE OK` in both of its tasks.
 
 > Apple Silicon builds `linux/amd64` under emulation (Beaker nodes are x86) — slower
 > but correct; the flag is already set. The image name/ref stays stable across
