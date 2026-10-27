@@ -397,7 +397,8 @@ class GLMHMMTrainer(ModelTrainer):
             "glmhmm/emission": self.emission,
             "glmhmm/n_lags": self.n_lags,
             "glmhmm/global/log_joint": float(global_fit.log_joint[-1]),
-            "glmhmm/global/em_iters": int(len(global_fit.log_joint)),
+            # The trace also holds the starting point's log joint: updates are one fewer.
+            "glmhmm/global/em_iters": int(len(global_fit.log_joint) - 1),
             "glmhmm/global/converged": bool(global_fit.converged),
             "glmhmm/global/restart_log_joints": [float(r.log_joint[-1]) for r in restarts],
             "glmhmm/global/num_train_trials": int(sum(len(r["choices"]) for r in train_records)),
@@ -497,7 +498,7 @@ class GLMHMMTrainer(ModelTrainer):
                 "eval_likelihood": scores.get("eval_likelihood"),
                 "eval_likelihood_LR_engaged": scores.get("eval_likelihood_LR_engaged"),
                 "eval_likelihood_engage": scores.get("eval_likelihood_engage"),
-                "em_iters": int(len(res["fit"].log_joint)),
+                "em_iters": int(len(res["fit"].log_joint) - 1),
                 "converged": bool(res["fit"].converged),
             })
         return rows

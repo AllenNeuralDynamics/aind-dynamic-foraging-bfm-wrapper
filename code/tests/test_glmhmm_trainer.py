@@ -200,6 +200,12 @@ class TestFit(unittest.TestCase):
             per_subject = pd.read_csv(folder / "heldout_per_subject.csv")
             self.assertEqual(int(per_subject["n_eval_trials"].sum()),
                              summary["heldout/num_eval_trials"])
+            # Iteration counts are EM updates: never more than max_em_iters (25 here), and one
+            # fewer than the log-joint trace, which also holds the starting point.
+            self.assertLessEqual(summary["glmhmm/global/em_iters"], 25)
+            self.assertEqual(summary["glmhmm/global/em_iters"],
+                             len(record["global_log_joint_trace"]) - 1)
+            self.assertTrue((per_subject["em_iters"] <= 25).all())
             trials = pd.read_parquet(folder / "heldout_trials.parquet")
             self.assertEqual(len(trials), 2 * 4 * 80)  # every held-out session, both splits
             probs = np.exp(trials[["logp_left", "logp_right", "logp_ignore"]].to_numpy())
