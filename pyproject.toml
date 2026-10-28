@@ -32,7 +32,7 @@ dependencies = [
     # image at 0.14.0 without it. The Dockerfile happens to mask that by editable-installing
     # the models checkout AFTER resolving these deps, but that is line ordering, not a
     # guarantee, and it does not hold for anything installing the wrapper on its own.
-    "aind-dynamic-foraging-models>=0.14.0",
+    "aind-dynamic-foraging-models>=0.24.0",
     "aind-dynamic-foraging-database==0.2.2",
     # pandas 3 changes the default string dtype (object -> StringDtype), which
     # the analysis code and its tests are not ported to. CI installs whatever is

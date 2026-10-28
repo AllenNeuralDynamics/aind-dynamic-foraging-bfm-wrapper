@@ -257,6 +257,78 @@ def _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta):
     logger.info("HBTrainer: wrote heldout_two_level draws to %s", run_dir)
 
 
+def _check_legacy_split(run_dir, n_trials):
+    """For draws saved before the split was recorded, check the scored sessions by trial count.
+
+    Such a fit's JSON has no ``sessions``; its scores file does have each scored session's
+    trial count, in order. A changed session list (a session dropped or added upstream) moves
+    the context/eval split and so changes those counts. Without either record the split cannot
+    be verified and the draws are refused.
+    """
+    import json
+
+    record = json.loads((run_dir / "heldout_two_level_fit.json").read_text())
+    if "sessions" in record:
+        return                       # checked exactly, by session id, on load
+    scores = run_dir / "heldout_two_level_scores.npz"
+    if not scores.exists():
+        raise ValueError(f"draws_path {run_dir} records no session split and has no scores "
+                         "file to check one against; refusing to rescore it.")
+    saved = np.asarray(np.load(scores)["n_trials"])
+    if saved.shape != np.shape(n_trials) or not np.array_equal(saved, n_trials):
+        raise ValueError(f"draws_path {run_dir}: the sessions to score differ from those the fit "
+                         "scored (trial counts disagree); the context/eval split has moved.")
+
+
+def _resolve_draws_dir(draws_path, subjects):
+    """The run directory for ``subjects``: ``draws_path`` itself, or its entry in a JSON index."""
+    import json
+
+    if draws_path.suffix != ".json":
+        return draws_path
+    index = json.loads(draws_path.read_text())
+    key = ",".join(sorted(str(s) for s in subjects))
+    if key not in index:
+        raise ValueError(f"draws index {draws_path} has no entry for subjects {key!r}.")
+    entry = Path(index[key])
+    return entry if entry.is_absolute() else draws_path.parent / entry
+
+
+def _load_two_level_draws(run_dir, subjects, expected=None):
+    """Draws and diagnostics saved by :func:`_save_two_level_draws`, checked against ``subjects``.
+
+    The draws carry a subject axis in the order the fit saw them; scoring them against a
+    different subject order would silently pair one subject's posterior with another's
+    sessions, so the order must match exactly. So must every setting in ``expected`` that the
+    fit recorded: ``eval_every_n``, the likelihood's ``beta_max``, and the context and eval
+    session ids of each subject (fits that predate that record are checked by
+    :func:`_check_legacy_split`).
+    """
+    import json
+
+    record = json.loads((run_dir / "heldout_two_level_fit.json").read_text())
+    if record["subject_ids"] != [str(s) for s in subjects]:
+        raise ValueError(
+            f"draws_path {run_dir} holds subjects {record['subject_ids']}, but this run scores "
+            f"{[str(s) for s in subjects]}; rescore with the same data.test_subject_ids."
+        )
+    for key, value in (expected or {}).items():
+        if key in record and record[key] != value:
+            raise ValueError(
+                f"draws_path {run_dir} was fitted with {key}={record[key]!r}, but this run uses "
+                f"{value!r}; the saved posterior would be scored against a different split or "
+                "likelihood.")
+    draws = np.load(run_dir / "heldout_two_level_draws.npz")
+    samples = {"mu_p": np.asarray(draws["mu_p"]), "log_sigma": np.asarray(draws["log_sigma"])}
+    diagnostics = {
+        "max_r_hat": np.asarray(record["max_r_hat"]),
+        "min_ess_bulk": np.asarray(record["min_ess_bulk"]),
+        "divergences": record["divergences"],
+    }
+    logger.info("HBTrainer: loaded heldout_two_level draws from %s; fit skipped", run_dir)
+    return samples, diagnostics
+
+
 def _source_revisions():
     """Git SHAs of the repositories whose code produced a fit.
 
@@ -348,6 +420,10 @@ class HBTrainer(ModelTrainer):
         progress_bar: bool = False,
         progress_rate: int | None = None,
         session_draws_per_posterior_draw: int = 64,
+        centered: bool = False,
+        draws_path: Optional[str] = None,
+        importance_rescore: bool = False,
+        importance_draws: int = 24000,
         architecture: Mapping[str, Any] | Any = {},
         output_dir: str = "/results/outputs",
         seed: Optional[int] = None,
@@ -416,6 +492,28 @@ class HBTrainer(ModelTrainer):
             likelihood. That estimate rests on the few draws that fit the whole session, so
             it needs far more draws than the trial-marginal; each session's weight ESS is
             reported so a starved estimate is visible.
+        centered : bool
+            **``heldout_two_level`` only.** Sample the session level centred,
+            ``theta ~ Normal(mu_p, sigma)``, instead of non-centred: the one refit PLAN.md
+            allows a subject that failed the gates (study 13).
+        draws_path : str, optional
+            **``heldout_two_level`` only.** A run directory holding
+            ``heldout_two_level_draws.npz`` and ``heldout_two_level_fit.json`` from an
+            earlier fit of the same subjects. The fit is skipped and those draws (and their
+            diagnostics) are scored, so a rescore uses the identical data path. With the same
+            seed and subjects the plain scores reproduce the original run exactly. May
+            instead be a ``.json`` file mapping each subject id (several, comma-joined in
+            sorted order) to its run directory, so a sweep with one subject per run can share
+            one index.
+        importance_rescore : bool
+            **``heldout_two_level`` only.** Rescore every session that fails the Pareto k-hat
+            gate by importance sampling (foraging-models'
+            ``importance_sampled_session_marginal``), which estimates the same
+            session-marginal with weights that do not starve. The headline then uses the
+            importance-sampled value for those sessions; the all-plain value is kept beside
+            it under ``*_plain`` keys.
+        importance_draws : int
+            Proposal draws per rescored session.
         architecture : mapping
             Present for parity with the other trainers; unused.
         output_dir : str
@@ -456,6 +554,10 @@ class HBTrainer(ModelTrainer):
         self.progress_bar = bool(progress_bar)
         self.progress_rate = None if progress_rate is None else int(progress_rate)
         self.session_draws_per_posterior_draw = int(session_draws_per_posterior_draw)
+        self.centered = bool(centered)
+        self.draws_path = draws_path
+        self.importance_rescore = bool(importance_rescore)
+        self.importance_draws = int(importance_draws)
         self.output_dir = output_dir
 
     def fit(
@@ -748,6 +850,7 @@ class HBTrainer(ModelTrainer):
         from aind_dynamic_foraging_models.hierarchical_bayes.heldout import (
             batched_heldout_scores,
             fit_heldout_two_level,
+            importance_sampled_session_marginal,
             pareto_k_threshold,
             pooled_likelihood,
         )
@@ -760,11 +863,14 @@ class HBTrainer(ModelTrainer):
             )
         choices, rewards, session_ids = _extract_subject_sessions(heldout_df)
         subjects, context_indices, score_indices = [], [], []
+        split: Dict[str, Dict[str, List[str]]] = {}
         for subject, ids in session_ids.items():
             if len(ids) < 2:
                 continue
             train_ids, eval_ids = compute_train_eval_session_ids(ids, self.eval_every_n)
             index_of = {sid: i for i, sid in enumerate(ids)}
+            split[str(subject)] = {"context": [str(i) for i in train_ids],
+                                   "eval": [str(i) for i in eval_ids]}
             subjects.append(subject)
             context_indices.append([index_of[sid] for sid in train_ids])
             score_indices.append([index_of[sid] for sid in eval_ids])
@@ -778,28 +884,46 @@ class HBTrainer(ModelTrainer):
         context_c, context_r, ctx_session_mask, ctx_valid = _pad_context(
             subjects, choices, rewards, context_indices
         )
-        samples, diagnostics = fit_heldout_two_level(
-            context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
-            valid_mask=ctx_valid, num_warmup=self.num_warmup, num_samples=self.num_samples,
-            num_chains=self.num_chains, beta_max=self.beta_max, progress_bar=self.progress_bar,
-        )
+        draws_dir = None
+        if self.draws_path:
+            draws_dir = _resolve_draws_dir(Path(self.draws_path), subjects)
+            samples, diagnostics = _load_two_level_draws(
+                draws_dir, subjects,
+                expected={"eval_every_n": self.eval_every_n, "beta_max": self.beta_max,
+                          "sessions": split})
+        else:
+            samples, diagnostics = fit_heldout_two_level(
+                context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
+                valid_mask=ctx_valid, num_warmup=self.num_warmup,
+                num_samples=self.num_samples, num_chains=self.num_chains,
+                beta_max=self.beta_max, progress_bar=self.progress_bar,
+                centered=self.centered, target_accept_prob=self.target_accept_prob,
+                max_tree_depth=self.max_tree_depth,
+            )
         fit_seconds = time.time() - started
         # Saved before scoring, so a failure there cannot lose the fit. One subdirectory per
-        # run: a sweep's runs share artifact_dir, and the file names are fixed.
+        # run: a sweep's runs share artifact_dir, and the file names are fixed. A rescore
+        # writes no draws: they already live under draws_path.
         run_dir = None
         if self.artifact_dir:
             run_tag = str(getattr(wandb_run, "id", None)
                           or f"seed{self.seed}-{uuid.uuid4().hex[:8]}")
             run_dir = Path(self.artifact_dir) / run_tag
-            _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta={
-                "seed": self.seed, "num_chains": self.num_chains,
-                "num_warmup": self.num_warmup, "num_samples": self.num_samples,
-                "beta_max": self.beta_max, "eval_every_n": self.eval_every_n,
-                "session_draws_per_posterior_draw": self.session_draws_per_posterior_draw,
-                **_source_revisions(),
-            })
+            run_dir.mkdir(parents=True, exist_ok=True)
+            if not self.draws_path:
+                _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta={
+                    "seed": self.seed, "num_chains": self.num_chains,
+                    "num_warmup": self.num_warmup, "num_samples": self.num_samples,
+                    "beta_max": self.beta_max, "eval_every_n": self.eval_every_n,
+                    "session_draws_per_posterior_draw": self.session_draws_per_posterior_draw,
+                    "centered": self.centered, "target_accept_prob": self.target_accept_prob,
+                    "max_tree_depth": self.max_tree_depth, "sessions": split,
+                    **_source_revisions(),
+                })
 
         flat = _flatten_for_scoring(subjects, choices, rewards, score_indices)
+        if draws_dir is not None:
+            _check_legacy_split(draws_dir, np.sum(np.asarray(flat["valid_mask"]), axis=-1))
         scored = batched_heldout_scores(
             samples, flat["subject_indices"], flat["choices"], flat["rewards"],
             valid_mask=flat["valid_mask"], rng_key=key_draw, beta_max=self.beta_max,
@@ -810,6 +934,39 @@ class HBTrainer(ModelTrainer):
         k_threshold = pareto_k_threshold(n_draws)
         # nan means unjudged, which fails the gate like a high k-hat.
         k_fails = ~(np.asarray(scored["pareto_k"]) < k_threshold)
+
+        # Sessions whose plain draw-average starved are rescored by importance sampling; the
+        # headline takes those values, and the all-plain ones are kept as *_plain.
+        plain_marginal = np.asarray(scored["session_marginal"], dtype=float)
+        headline = plain_marginal.copy()
+        rescored = np.zeros(len(headline), dtype=bool)
+        is_se = np.zeros(len(headline))
+        is_k = np.full(len(headline), np.nan)
+        is_ess = np.full(len(headline), np.nan)
+        if self.importance_rescore and np.any(k_fails):
+            key_is = jax.random.fold_in(key_draw, 1)
+            mu_all = np.asarray(samples["mu_p"])
+            log_sigma_all = np.asarray(samples["log_sigma"])
+            for position in range(len(subjects)):
+                rows = np.asarray(flat["rows_by_subject"][position], dtype=int)
+                rows = rows[k_fails[rows]]
+                if rows.size == 0:
+                    continue
+                result = importance_sampled_session_marginal(
+                    mu_all[:, position, :], log_sigma_all[:, position, :],
+                    np.asarray(flat["choices"])[rows], np.asarray(flat["rewards"])[rows],
+                    valid_mask=np.asarray(flat["valid_mask"])[rows],
+                    rng_key=jax.random.fold_in(key_is, position), beta_max=self.beta_max,
+                    n_proposal=self.importance_draws,
+                )
+                headline[rows] = result["session_marginal"]
+                is_se[rows] = result["session_marginal_se"]
+                is_k[rows] = result["pareto_k"]
+                is_ess[rows] = result["weight_ess"]
+                rescored[rows] = True
+        is_threshold = pareto_k_threshold(self.importance_draws)
+        # After rescoring, a session fails only if its final estimator fails its own gate.
+        final_fails = np.where(rescored, ~(is_k < is_threshold), k_fails)
         per_subject: Dict[str, Any] = {}
         converged_rows: List[int] = []
         for position, subject in enumerate(subjects):
@@ -822,8 +979,9 @@ class HBTrainer(ModelTrainer):
             if converged:
                 converged_rows.extend(int(r) for r in rows)
             per_subject[str(subject)] = {
-                "likelihood": _normalized_likelihood(
-                    float(np.sum(scored["session_marginal"][rows])), n_trials),
+                "likelihood": _normalized_likelihood(float(np.sum(headline[rows])), n_trials),
+                "likelihood_plain": _normalized_likelihood(
+                    float(np.sum(plain_marginal[rows])), n_trials),
                 "likelihood_trial_marginal": _normalized_likelihood(
                     float(np.sum(scored["trial_marginal"][rows])), n_trials),
                 "n_context": len(context_indices[position]),
@@ -835,26 +993,45 @@ class HBTrainer(ModelTrainer):
                 # -inf (identical weights) is a judged pass; nan only if all are unjudged.
                 "max_pareto_k": float(np.nanmax(scored["pareto_k"][rows]))
                 if not np.all(np.isnan(scored["pareto_k"][rows])) else float("nan"),
-                "n_sessions_pareto_k_fail": int(np.sum(k_fails[rows])),
+                "n_sessions_pareto_k_fail": int(np.sum(final_fails[rows])),
+                "n_sessions_pareto_k_fail_plain": int(np.sum(k_fails[rows])),
+                "n_sessions_importance": int(np.sum(rescored[rows])),
                 "converged": converged,
             }
 
-        likelihood, likelihood_se = pooled_likelihood(
-            scored["session_marginal"], scored["n_trials"], scored["relative_weights"]
-        )
-        trial_marginal, _ = pooled_likelihood(scored["trial_marginal"], scored["n_trials"])
+        n_trials_all = np.asarray(scored["n_trials"])
+        relative = np.asarray(scored["relative_weights"])
+        plain_likelihood, plain_se = pooled_likelihood(plain_marginal, n_trials_all, relative)
+        n_eval_trials = int(np.sum(n_trials_all))
+        if rescored.any():
+            # The error from the finite posterior draws is shared by every session, rescored
+            # or not, so it is kept whole: the plain joint error over all sessions, from their
+            # per-draw weights. The importance-sampled sessions add their proposal error, which
+            # is independent of it given the draws, in quadrature.
+            sum_se_plain = plain_se * n_eval_trials / plain_likelihood
+            sum_se = float(np.hypot(sum_se_plain, np.sqrt(np.sum(is_se[rescored] ** 2))))
+            likelihood = _normalized_likelihood(float(np.sum(headline)), n_eval_trials)
+            likelihood_se = likelihood * sum_se / n_eval_trials
+        else:
+            likelihood, likelihood_se = plain_likelihood, plain_se
+            sum_se = likelihood_se * n_eval_trials / likelihood
+        trial_marginal, _ = pooled_likelihood(scored["trial_marginal"], n_trials_all)
         converged_only = (
-            pooled_likelihood(scored["session_marginal"][converged_rows],
-                              scored["n_trials"][converged_rows])[0]
+            _normalized_likelihood(float(np.sum(headline[converged_rows])),
+                                   int(np.sum(n_trials_all[converged_rows])))
             if converged_rows else None
         )
-        n_eval_trials = int(np.sum(scored["n_trials"]))
         summary = {
             # Totals, so runs that each fit a subset of subjects (data.test_subject_ids) pool
             # exactly: exp(sum of log_lik_sum / sum of trials), errors in quadrature, since
             # separate runs share no posterior draws and their keys differ by subject set.
-            "heldout/eval_log_lik_sum": float(np.sum(scored["session_marginal"])),
-            "heldout/eval_log_lik_sum_se": likelihood_se * n_eval_trials / likelihood,
+            "heldout/eval_log_lik_sum": float(np.sum(headline)),
+            "heldout/eval_log_lik_sum_se": sum_se,
+            "heldout/eval_log_lik_sum_plain": float(np.sum(plain_marginal)),
+            "heldout/eval_log_lik_sum_plain_se": plain_se * n_eval_trials / plain_likelihood,
+            "heldout/eval_likelihood_plain": plain_likelihood,
+            "heldout/n_sessions_importance": int(np.sum(rescored)),
+            "heldout/importance_pareto_k_threshold": is_threshold,
             "heldout/eval_log_lik_sum_trial_marginal": float(np.sum(scored["trial_marginal"])),
             "heldout/eval_likelihood": likelihood,
             "heldout/eval_likelihood_se": likelihood_se,
@@ -865,7 +1042,8 @@ class HBTrainer(ModelTrainer):
             "heldout/min_weight_ess": float(np.min(scored["weight_ess"])),
             "heldout/median_weight_ess": float(np.median(scored["weight_ess"])),
             "heldout/pareto_k_threshold": k_threshold,
-            "heldout/n_sessions_pareto_k_fail": int(np.sum(k_fails)),
+            "heldout/n_sessions_pareto_k_fail": int(np.sum(final_fails)),
+            "heldout/n_sessions_pareto_k_fail_plain": int(np.sum(k_fails)),
             "heldout/n_sessions": int(len(k_fails)),
             "hb/n_subjects_converged": sum(row["converged"] for row in per_subject.values()),
             "hb/max_r_hat": float(np.max(diagnostics["max_r_hat"])),
@@ -890,6 +1068,8 @@ class HBTrainer(ModelTrainer):
                 run_dir / "heldout_two_level_scores.npz",
                 subject_indices=np.asarray(flat["subject_indices"]),
                 **{k: np.asarray(v) for k, v in scored.items()},
+                session_marginal_headline=headline, importance_rescored=rescored,
+                importance_se=is_se, importance_pareto_k=is_k, importance_weight_ess=is_ess,
             )
         return {
             "estimator": "heldout_two_level",

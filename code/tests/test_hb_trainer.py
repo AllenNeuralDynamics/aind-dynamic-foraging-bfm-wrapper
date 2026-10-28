@@ -270,6 +270,139 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         self.assertEqual(first, again)
         self.assertNotEqual(first, other)
 
+    def _rescore(self, **kwargs):
+        """Score the saved draws again, through the same data path, without fitting."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        run = self._Run()
+        with tempfile.TemporaryDirectory() as out:
+            trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=4, seed=0,
+                                draws_path=str(run_dir), artifact_dir=out, **kwargs)
+            output = trainer.fit(bundle, loggers={"wandb": run})
+            (scores_dir,) = list(Path(out).iterdir())
+            self.assertTrue((scores_dir / "heldout_two_level_scores.npz").exists())
+            self.assertFalse((scores_dir / "heldout_two_level_draws.npz").exists())
+        return output, run.summary
+
+    def test_rescore_from_draws_reproduces_the_fit_exactly(self):
+        """Same seed and subjects: the saved draws give the original scores to the bit."""
+        output, summary = self._rescore()
+        self.assertEqual(summary["heldout/eval_log_lik_sum"],
+                         self.wandb_run.summary["heldout/eval_log_lik_sum"])
+        self.assertEqual(output["heldout_likelihood"]["matched"],
+                         self.output["heldout_likelihood"]["matched"])
+        self.assertEqual(summary["heldout/n_sessions_importance"], 0)
+
+    def test_importance_rescore_replaces_only_failing_sessions(self):
+        """Every session forced to fail: all are rescored, and the plain total is kept."""
+        from unittest import mock
+
+        with mock.patch("aind_dynamic_foraging_models.hierarchical_bayes.heldout."
+                        "pareto_k_threshold", return_value=-np.inf):
+            output, summary = self._rescore(importance_rescore=True, importance_draws=2000)
+        n_sessions = summary["heldout/n_sessions"]
+        self.assertEqual(summary["heldout/n_sessions_importance"], n_sessions)
+        self.assertEqual(summary["heldout/eval_log_lik_sum_plain"],
+                         self.wandb_run.summary["heldout/eval_log_lik_sum"])
+        self.assertNotEqual(summary["heldout/eval_log_lik_sum"],
+                            summary["heldout/eval_log_lik_sum_plain"])
+        self.assertAlmostEqual(
+            np.exp(summary["heldout/eval_log_lik_sum"] / summary["heldout/num_eval_trials"]),
+            summary["heldout/eval_likelihood"], places=6)
+        self.assertGreater(summary["heldout/eval_log_lik_sum_se"], 0.0)
+        for row in output["heldout_per_subject_matched"].values():
+            self.assertEqual(row["n_sessions_importance"], row["n_scored"])
+
+    def test_rescore_refuses_a_different_split(self):
+        """Draws fitted on one context/eval split must not be scored on another."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=3,
+                            seed=0, draws_path=str(run_dir))
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
+    def test_rescore_refuses_a_changed_session_list(self):
+        """Same subjects and split rule, one session gone: the split moves, so refuse."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        frame = _make_frame(n_subjects=2, n_sessions=4, n_trials=50, seed=7)
+        first = frame[frame["subject_id"] == "m0"]["ses_idx"].min()
+        frame = frame[~((frame["subject_id"] == "m0") & (frame["ses_idx"] == first))]
+        bundle = DatasetBundle(raw=None, train_set=None, eval_set=None, metadata={},
+                               extras={"heldout_raw": frame})
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                            seed=0, draws_path=str(run_dir))
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
+    def test_legacy_draws_are_checked_by_trial_count(self):
+        """A fit JSON without the split falls back to the scores file's trial counts."""
+        import json
+        import shutil
+
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "legacy"
+            shutil.copytree(run_dir, legacy)
+            record = json.loads((legacy / "heldout_two_level_fit.json").read_text())
+            record.pop("sessions")
+            (legacy / "heldout_two_level_fit.json").write_text(json.dumps(record))
+            bundle = DatasetBundle(
+                raw=None, train_set=None, eval_set=None, metadata={},
+                extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                                   n_trials=50, seed=7)},
+            )
+            trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=4, seed=0,
+                                draws_path=str(legacy))
+            self.assertEqual(trainer.fit(bundle)["heldout_likelihood"]["matched"],
+                             self.output["heldout_likelihood"]["matched"])
+            (legacy / "heldout_two_level_scores.npz").unlink()
+            with self.assertRaises(ValueError):
+                trainer.fit(bundle)
+
+    def test_draws_path_may_be_an_index(self):
+        """A JSON index maps the subject set to its run directory, relative to the index."""
+        import json
+
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Path(tmp) / "draws.json"
+            index.write_text(json.dumps({"m0,m1": str(run_dir)}))
+            bundle = DatasetBundle(
+                raw=None, train_set=None, eval_set=None, metadata={},
+                extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                                   n_trials=50, seed=7)},
+            )
+            trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=4, seed=0,
+                                draws_path=str(index))
+            output = trainer.fit(bundle)
+        self.assertEqual(output["heldout_likelihood"]["matched"],
+                         self.output["heldout_likelihood"]["matched"])
+
+    def test_rescore_refuses_draws_of_other_subjects(self):
+        """Draws pair with sessions by position, so a different subject set must not load."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=1, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, seed=0,
+                            draws_path=str(run_dir))
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
     def test_requires_a_heldout_cohort(self):
         """Without held-out subjects there is nothing to fit."""
         bundle = DatasetBundle(raw=_make_frame(), train_set=None, eval_set=None, metadata={})
