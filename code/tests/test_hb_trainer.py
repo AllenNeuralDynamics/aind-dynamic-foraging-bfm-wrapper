@@ -313,6 +313,26 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         for row in output["heldout_per_subject_matched"].values():
             self.assertEqual(row["n_sessions_importance"], row["n_scored"])
 
+    def test_draws_path_may_be_an_index(self):
+        """A JSON index maps the subject set to its run directory, relative to the index."""
+        import json
+
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Path(tmp) / "draws.json"
+            index.write_text(json.dumps({"m0,m1": str(run_dir)}))
+            bundle = DatasetBundle(
+                raw=None, train_set=None, eval_set=None, metadata={},
+                extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                                   n_trials=50, seed=7)},
+            )
+            trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=4, seed=0,
+                                draws_path=str(index))
+            output = trainer.fit(bundle)
+        self.assertEqual(output["heldout_likelihood"]["matched"],
+                         self.output["heldout_likelihood"]["matched"])
+
     def test_rescore_refuses_draws_of_other_subjects(self):
         """Draws pair with sessions by position, so a different subject set must not load."""
         (run_dir,) = list(Path(self.artifacts.name).iterdir())

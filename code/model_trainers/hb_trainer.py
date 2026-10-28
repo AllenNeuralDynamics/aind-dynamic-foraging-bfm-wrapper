@@ -257,6 +257,20 @@ def _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta):
     logger.info("HBTrainer: wrote heldout_two_level draws to %s", run_dir)
 
 
+def _resolve_draws_dir(draws_path, subjects):
+    """The run directory for ``subjects``: ``draws_path`` itself, or its entry in a JSON index."""
+    import json
+
+    if draws_path.suffix != ".json":
+        return draws_path
+    index = json.loads(draws_path.read_text())
+    key = ",".join(sorted(str(s) for s in subjects))
+    if key not in index:
+        raise ValueError(f"draws index {draws_path} has no entry for subjects {key!r}.")
+    entry = Path(index[key])
+    return entry if entry.is_absolute() else draws_path.parent / entry
+
+
 def _load_two_level_draws(run_dir, subjects):
     """Draws and diagnostics saved by :func:`_save_two_level_draws`, checked against ``subjects``.
 
@@ -455,7 +469,10 @@ class HBTrainer(ModelTrainer):
             ``heldout_two_level_draws.npz`` and ``heldout_two_level_fit.json`` from an
             earlier fit of the same subjects. The fit is skipped and those draws (and their
             diagnostics) are scored, so a rescore uses the identical data path. With the same
-            seed and subjects the plain scores reproduce the original run exactly.
+            seed and subjects the plain scores reproduce the original run exactly. May
+            instead be a ``.json`` file mapping each subject id (several, comma-joined in
+            sorted order) to its run directory, so a sweep with one subject per run can share
+            one index.
         importance_rescore : bool
             **``heldout_two_level`` only.** Rescore every session that fails the Pareto k-hat
             gate by importance sampling (foraging-models'
@@ -833,7 +850,8 @@ class HBTrainer(ModelTrainer):
             subjects, choices, rewards, context_indices
         )
         if self.draws_path:
-            samples, diagnostics = _load_two_level_draws(Path(self.draws_path), subjects)
+            samples, diagnostics = _load_two_level_draws(
+                _resolve_draws_dir(Path(self.draws_path), subjects), subjects)
         else:
             samples, diagnostics = fit_heldout_two_level(
                 context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
