@@ -279,10 +279,15 @@ class TestHeldoutTwoLevel(unittest.TestCase):
                                                n_trials=50, seed=7)},
         )
         run = self._Run()
-        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
-                            session_draws_per_posterior_draw=4, seed=0,
-                            draws_path=str(run_dir), **kwargs)
-        return trainer.fit(bundle, loggers={"wandb": run}), run.summary
+        with tempfile.TemporaryDirectory() as out:
+            trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=4, seed=0,
+                                draws_path=str(run_dir), artifact_dir=out, **kwargs)
+            output = trainer.fit(bundle, loggers={"wandb": run})
+            (scores_dir,) = list(Path(out).iterdir())
+            self.assertTrue((scores_dir / "heldout_two_level_scores.npz").exists())
+            self.assertFalse((scores_dir / "heldout_two_level_draws.npz").exists())
+        return output, run.summary
 
     def test_rescore_from_draws_reproduces_the_fit_exactly(self):
         """Same seed and subjects: the saved draws give the original scores to the bit."""
@@ -312,6 +317,19 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         self.assertGreater(summary["heldout/eval_log_lik_sum_se"], 0.0)
         for row in output["heldout_per_subject_matched"].values():
             self.assertEqual(row["n_sessions_importance"], row["n_scored"])
+
+    def test_rescore_refuses_a_different_split(self):
+        """Draws fitted on one context/eval split must not be scored on another."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=3,
+                            seed=0, draws_path=str(run_dir))
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
 
     def test_draws_path_may_be_an_index(self):
         """A JSON index maps the subject set to its run directory, relative to the index."""

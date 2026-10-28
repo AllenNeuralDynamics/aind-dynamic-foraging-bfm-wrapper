@@ -271,12 +271,13 @@ def _resolve_draws_dir(draws_path, subjects):
     return entry if entry.is_absolute() else draws_path.parent / entry
 
 
-def _load_two_level_draws(run_dir, subjects):
+def _load_two_level_draws(run_dir, subjects, expected=None):
     """Draws and diagnostics saved by :func:`_save_two_level_draws`, checked against ``subjects``.
 
     The draws carry a subject axis in the order the fit saw them; scoring them against a
     different subject order would silently pair one subject's posterior with another's
-    sessions, so the order must match exactly.
+    sessions, so the order must match exactly. So must every setting in ``expected`` that the
+    fit recorded (the context/eval split and the likelihood's ``beta_max``).
     """
     import json
 
@@ -286,6 +287,12 @@ def _load_two_level_draws(run_dir, subjects):
             f"draws_path {run_dir} holds subjects {record['subject_ids']}, but this run scores "
             f"{[str(s) for s in subjects]}; rescore with the same data.test_subject_ids."
         )
+    for key, value in (expected or {}).items():
+        if key in record and record[key] != value:
+            raise ValueError(
+                f"draws_path {run_dir} was fitted with {key}={record[key]!r}, but this run uses "
+                f"{value!r}; the saved posterior would be scored against a different split or "
+                "likelihood.")
     draws = np.load(run_dir / "heldout_two_level_draws.npz")
     samples = {"mu_p": np.asarray(draws["mu_p"]), "log_sigma": np.asarray(draws["log_sigma"])}
     diagnostics = {
@@ -851,7 +858,8 @@ class HBTrainer(ModelTrainer):
         )
         if self.draws_path:
             samples, diagnostics = _load_two_level_draws(
-                _resolve_draws_dir(Path(self.draws_path), subjects), subjects)
+                _resolve_draws_dir(Path(self.draws_path), subjects), subjects,
+                expected={"eval_every_n": self.eval_every_n, "beta_max": self.beta_max})
         else:
             samples, diagnostics = fit_heldout_two_level(
                 context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
@@ -870,6 +878,7 @@ class HBTrainer(ModelTrainer):
             run_tag = str(getattr(wandb_run, "id", None)
                           or f"seed{self.seed}-{uuid.uuid4().hex[:8]}")
             run_dir = Path(self.artifact_dir) / run_tag
+            run_dir.mkdir(parents=True, exist_ok=True)
             if not self.draws_path:
                 _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta={
                     "seed": self.seed, "num_chains": self.num_chains,
@@ -962,15 +971,11 @@ class HBTrainer(ModelTrainer):
         plain_likelihood, plain_se = pooled_likelihood(plain_marginal, n_trials_all, relative)
         n_eval_trials = int(np.sum(n_trials_all))
         if rescored.any():
-            # Plain sessions share posterior draws, so their error is pooled jointly; the
-            # importance-sampled ones use independent proposal draws and add in quadrature.
-            # Both are conditional on the posterior draws, as the plain error always was.
-            kept = ~rescored
-            sum_se_plain = 0.0
-            if kept.any():
-                kept_lik, kept_se = pooled_likelihood(
-                    plain_marginal[kept], n_trials_all[kept], relative[:, kept])
-                sum_se_plain = kept_se * int(np.sum(n_trials_all[kept])) / kept_lik
+            # The error from the finite posterior draws is shared by every session, rescored
+            # or not, so it is kept whole: the plain joint error over all sessions, from their
+            # per-draw weights. The importance-sampled sessions add their proposal error, which
+            # is independent of it given the draws, in quadrature.
+            sum_se_plain = plain_se * n_eval_trials / plain_likelihood
             sum_se = float(np.hypot(sum_se_plain, np.sqrt(np.sum(is_se[rescored] ** 2))))
             likelihood = _normalized_likelihood(float(np.sum(headline)), n_eval_trials)
             likelihood_se = likelihood * sum_se / n_eval_trials
