@@ -1,5 +1,23 @@
 # Global AGENTS.md
 
+## Explaining and Reporting Style
+
+Source: Karpathy's advice to ask for explanations in
+[ASD-STE100](https://www.asd-ste100.org/) (Simplified Technical English), at about 80%
+strictness.
+
+**In conversation:**
+- **Plain language, about 80% of ASD-STE100.** Short sentences, one action or idea per
+  sentence, active voice, one meaning per word, no filler. Keep exact technical terms; do
+  not force the full approved-word list.
+- **Show, do not only tell.** Explain with a diagram where one helps. For a long or
+  structured explanation, prefer an HTML page over a wall of text.
+
+**In reports:**
+- **The same plain language as in conversation.**
+- **Order of preference: figure > table > narrative.** A figure beats a table. A table
+  beats prose. Use narrative only for what a figure or table cannot carry.
+
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 The four-principle backbone (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) is adapted from [multica-ai/andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills), which distills [Andrej Karpathy's observations](https://x.com/karpathy/status/2015883857489522876) on LLM coding pitfalls. HPC-specific rules and the commit-message convention below are local additions.
@@ -114,17 +132,3 @@ Rules:
   `code/POST_TRAINING_ANALYSIS.md`. When you add or change a feature, update the
   relevant guide + its Changelog — the skills defer to these files.
 - Never squash-merge a PR (`gh pr merge <n> --merge`) — preserve per-commit history.
-
-## Explaining and Reporting Style
-
-Applies to conversation replies and to reports. Source: Karpathy's advice to ask for
-explanations in [ASD-STE100](https://www.asd-ste100.org/) (Simplified Technical English), at
-about 80% strictness.
-
-- **Plain language, about 80% of ASD-STE100.** Short sentences (under about 20 words), one
-  action or idea per sentence, active voice, one meaning per word, no filler. Keep exact
-  technical terms; do not force the full approved-word list.
-- **Show, do not only tell.** Explain with a diagram where one helps. For a long or
-  structured explanation, prefer an HTML page over a wall of text.
-- **Order of preference in reports: figure > table > narrative.** A figure beats a table. A
-  table beats prose. Use narrative only for what a figure or table cannot carry.
