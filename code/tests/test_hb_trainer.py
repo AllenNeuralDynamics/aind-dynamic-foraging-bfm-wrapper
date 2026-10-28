@@ -370,6 +370,39 @@ class TestHeldoutTwoLevel(unittest.TestCase):
             with self.assertRaises(ValueError):
                 trainer.fit(bundle)
 
+    def test_rescore_refuses_draws_of_another_model(self):
+        """Hattori draws must not be scored as CTT (parameters mean different things)."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                            seed=0, draws_path=str(run_dir), hb_model="ctt")
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
+    def test_ctt_fits_and_scores(self):
+        """The compare-to-threshold forager runs through the same held-out path."""
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        run = self._Run()
+        with tempfile.TemporaryDirectory() as out:
+            trainer = HBTrainer(estimator="heldout_two_level", hb_model="ctt", num_warmup=20,
+                                num_samples=20, num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=2, artifact_dir=out, seed=0)
+            output = trainer.fit(bundle, loggers={"wandb": run})
+            (run_dir,) = list(Path(out).iterdir())
+            self.assertEqual(np.load(run_dir / "heldout_two_level_draws.npz")["mu_p"].shape,
+                             (40, 2, 4))
+            self.assertIn('"hb_model": "ctt"', (run_dir / "heldout_two_level_fit.json").read_text())
+        self.assertTrue(0.0 < output["heldout_likelihood"]["matched"] < 1.0)
+        self.assertEqual(run.summary["hb/model"], "ctt")
+
     def test_draws_path_may_be_an_index(self):
         """A JSON index maps the subject set to its run directory, relative to the index."""
         import json
