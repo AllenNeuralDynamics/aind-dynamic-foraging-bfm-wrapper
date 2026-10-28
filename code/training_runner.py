@@ -315,7 +315,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
 
     # The hierarchical Bayesian and GLM-HMM trainers score held-out subjects themselves, and
     # need their trials to come from the same loader as the training split -- otherwise the
-    # two are filtered independently and the comparison against the neural models is void.
+    # two are filtered independently and the comparison against the RNN models is void.
     # The GLM-HMM also takes the held-out loader's train/eval session split from its metadata,
     # so it conditions on and scores exactly the sessions the GRU fine-tune does.
     if model_type in {"hb", "glmhmm"} and heldout_cfg.enabled:
@@ -609,7 +609,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
                 output["heldout_finetune"] = auto_summary
         elif model_type in {"disrnn", "gru"}:
             # hb and glmhmm score held-out subjects inside fit(); this note is only true of
-            # the neural models.
+            # the RNN models (gru, disrnn).
             logger.info(
                 "Skipping end-of-training held-out fine-tune for multisubject %s: "
                 "auto_heldout_finetune.enabled is FALSE (this run logs seen-subject "

@@ -80,7 +80,7 @@ These are **not the same knob.** The *"Skipping held-out evaluation … seen-sub
 personalization only"* log line refers to the **first** (per-checkpoint eval); the
 second still runs and produces `heldout/final/eval_likelihood`. Full detail in §8.
 
-Both switches apply to the neural models (`gru`, `disrnn`) only. `hb` and `glmhmm` score
+Both switches apply to the RNN models (`gru`, `disrnn`) only. `hb` and `glmhmm` score
 held-out subjects inside `fit()`, from the cohort the runner loads into
 `bundle.extras["heldout_raw"]`, so they log `heldout/*` regardless of
 `auto_heldout_finetune` (§5).

@@ -149,6 +149,10 @@ class TestFit(unittest.TestCase):
             """Record a log call."""
             self.logged.append(payload)
 
+        def log_artifact(self, artifact):
+            """Record an uploaded artifact."""
+            self.logged.append(artifact)
+
     def _bundle(self, ignore_policy="include"):
         """Training cohort m0-m2 and held-out cohort h0-h1, split as the loader splits."""
         train = _make_frame(("m0", "m1", "m2"), seed=0)
@@ -212,6 +216,31 @@ class TestFit(unittest.TestCase):
             np.testing.assert_allclose(probs.sum(1), 1.0, atol=1e-5)
             np.testing.assert_allclose(trials[["smoothed_0", "smoothed_1"]].sum(1), 1.0,
                                        atol=1e-5)
+            # The output folder is uploaded to W&B, so it outlives the local results.
+            artifacts = [p for p in run.logged if getattr(p, "type", None) == "glmhmm-output"]
+            self.assertEqual(len(artifacts), 1)
+            self.assertTrue(artifacts[0].name.startswith("glmhmm-output-"))
+            self.assertLessEqual({"fit.json", "heldout_per_subject.csv", "heldout_trials.parquet"},
+                                 set(artifacts[0].manifest.entries))
+            self.assertEqual(artifacts[0].metadata["num_states"], 2)
+
+    def test_a_failed_artifact_upload_keeps_the_fit(self):
+        """W&B refusing the artifact logs a warning; the fit, scores and files stand."""
+        with tempfile.TemporaryDirectory() as out:
+            run = self._Run()
+
+            def refuse(artifact):
+                """Fail like an unreachable W&B."""
+                raise ConnectionError("W&B unreachable")
+
+            run.log_artifact = refuse
+            with self.assertLogs("model_trainers.glmhmm_trainer", level="WARNING") as logs:
+                summary = self._trainer(out, num_states=1).fit(self._bundle(),
+                                                               loggers={"wandb": run})
+            self.assertTrue(any("could not log the output artifact" in m for m in logs.output))
+            self.assertEqual(run.summary["heldout/eval_likelihood"],
+                             summary["heldout/eval_likelihood"])
+            self.assertTrue((Path(out) / "glmhmm" / "fit.json").exists())
 
     def test_per_subject_log_lik_sums_pool_to_the_headline(self):
         """Pooled per-subject log-lik sums and trial counts reproduce heldout/eval_likelihood."""
