@@ -257,6 +257,29 @@ def _save_two_level_draws(run_dir, samples, diagnostics, subjects, meta):
     logger.info("HBTrainer: wrote heldout_two_level draws to %s", run_dir)
 
 
+def _check_legacy_split(run_dir, n_trials):
+    """For draws saved before the split was recorded, check the scored sessions by trial count.
+
+    Such a fit's JSON has no ``sessions``; its scores file does have each scored session's
+    trial count, in order. A changed session list (a session dropped or added upstream) moves
+    the context/eval split and so changes those counts. Without either record the split cannot
+    be verified and the draws are refused.
+    """
+    import json
+
+    record = json.loads((run_dir / "heldout_two_level_fit.json").read_text())
+    if "sessions" in record:
+        return                       # checked exactly, by session id, on load
+    scores = run_dir / "heldout_two_level_scores.npz"
+    if not scores.exists():
+        raise ValueError(f"draws_path {run_dir} records no session split and has no scores "
+                         "file to check one against; refusing to rescore it.")
+    saved = np.asarray(np.load(scores)["n_trials"])
+    if saved.shape != np.shape(n_trials) or not np.array_equal(saved, n_trials):
+        raise ValueError(f"draws_path {run_dir}: the sessions to score differ from those the fit "
+                         "scored (trial counts disagree); the context/eval split has moved.")
+
+
 def _resolve_draws_dir(draws_path, subjects):
     """The run directory for ``subjects``: ``draws_path`` itself, or its entry in a JSON index."""
     import json
@@ -277,7 +300,9 @@ def _load_two_level_draws(run_dir, subjects, expected=None):
     The draws carry a subject axis in the order the fit saw them; scoring them against a
     different subject order would silently pair one subject's posterior with another's
     sessions, so the order must match exactly. So must every setting in ``expected`` that the
-    fit recorded (the context/eval split and the likelihood's ``beta_max``).
+    fit recorded: ``eval_every_n``, the likelihood's ``beta_max``, and the context and eval
+    session ids of each subject (fits that predate that record are checked by
+    :func:`_check_legacy_split`).
     """
     import json
 
@@ -838,11 +863,14 @@ class HBTrainer(ModelTrainer):
             )
         choices, rewards, session_ids = _extract_subject_sessions(heldout_df)
         subjects, context_indices, score_indices = [], [], []
+        split: Dict[str, Dict[str, List[str]]] = {}
         for subject, ids in session_ids.items():
             if len(ids) < 2:
                 continue
             train_ids, eval_ids = compute_train_eval_session_ids(ids, self.eval_every_n)
             index_of = {sid: i for i, sid in enumerate(ids)}
+            split[str(subject)] = {"context": [str(i) for i in train_ids],
+                                   "eval": [str(i) for i in eval_ids]}
             subjects.append(subject)
             context_indices.append([index_of[sid] for sid in train_ids])
             score_indices.append([index_of[sid] for sid in eval_ids])
@@ -856,10 +884,13 @@ class HBTrainer(ModelTrainer):
         context_c, context_r, ctx_session_mask, ctx_valid = _pad_context(
             subjects, choices, rewards, context_indices
         )
+        draws_dir = None
         if self.draws_path:
+            draws_dir = _resolve_draws_dir(Path(self.draws_path), subjects)
             samples, diagnostics = _load_two_level_draws(
-                _resolve_draws_dir(Path(self.draws_path), subjects), subjects,
-                expected={"eval_every_n": self.eval_every_n, "beta_max": self.beta_max})
+                draws_dir, subjects,
+                expected={"eval_every_n": self.eval_every_n, "beta_max": self.beta_max,
+                          "sessions": split})
         else:
             samples, diagnostics = fit_heldout_two_level(
                 context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
@@ -886,11 +917,13 @@ class HBTrainer(ModelTrainer):
                     "beta_max": self.beta_max, "eval_every_n": self.eval_every_n,
                     "session_draws_per_posterior_draw": self.session_draws_per_posterior_draw,
                     "centered": self.centered, "target_accept_prob": self.target_accept_prob,
-                    "max_tree_depth": self.max_tree_depth,
+                    "max_tree_depth": self.max_tree_depth, "sessions": split,
                     **_source_revisions(),
                 })
 
         flat = _flatten_for_scoring(subjects, choices, rewards, score_indices)
+        if draws_dir is not None:
+            _check_legacy_split(draws_dir, np.sum(np.asarray(flat["valid_mask"]), axis=-1))
         scored = batched_heldout_scores(
             samples, flat["subject_indices"], flat["choices"], flat["rewards"],
             valid_mask=flat["valid_mask"], rng_key=key_draw, beta_max=self.beta_max,

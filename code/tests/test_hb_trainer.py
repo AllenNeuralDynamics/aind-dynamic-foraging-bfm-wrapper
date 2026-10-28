@@ -331,6 +331,45 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         with self.assertRaises(ValueError):
             trainer.fit(bundle)
 
+    def test_rescore_refuses_a_changed_session_list(self):
+        """Same subjects and split rule, one session gone: the split moves, so refuse."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        frame = _make_frame(n_subjects=2, n_sessions=4, n_trials=50, seed=7)
+        first = frame[frame["subject_id"] == "m0"]["ses_idx"].min()
+        frame = frame[~((frame["subject_id"] == "m0") & (frame["ses_idx"] == first))]
+        bundle = DatasetBundle(raw=None, train_set=None, eval_set=None, metadata={},
+                               extras={"heldout_raw": frame})
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                            seed=0, draws_path=str(run_dir))
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
+    def test_legacy_draws_are_checked_by_trial_count(self):
+        """A fit JSON without the split falls back to the scores file's trial counts."""
+        import json
+        import shutil
+
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "legacy"
+            shutil.copytree(run_dir, legacy)
+            record = json.loads((legacy / "heldout_two_level_fit.json").read_text())
+            record.pop("sessions")
+            (legacy / "heldout_two_level_fit.json").write_text(json.dumps(record))
+            bundle = DatasetBundle(
+                raw=None, train_set=None, eval_set=None, metadata={},
+                extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                                   n_trials=50, seed=7)},
+            )
+            trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                                session_draws_per_posterior_draw=4, seed=0,
+                                draws_path=str(legacy))
+            self.assertEqual(trainer.fit(bundle)["heldout_likelihood"]["matched"],
+                             self.output["heldout_likelihood"]["matched"])
+            (legacy / "heldout_two_level_scores.npz").unlink()
+            with self.assertRaises(ValueError):
+                trainer.fit(bundle)
+
     def test_draws_path_may_be_an_index(self):
         """A JSON index maps the subject set to its run directory, relative to the index."""
         import json
