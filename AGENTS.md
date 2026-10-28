@@ -6,15 +6,21 @@ Source: Karpathy's advice to ask for explanations in
 [ASD-STE100](https://www.asd-ste100.org/) (Simplified Technical English), at about 80%
 strictness.
 
-**In conversation:**
-- **Plain language, about 80% of ASD-STE100.** Short sentences, one action or idea per
-  sentence, active voice, one meaning per word, no filler. Keep exact technical terms; do
-  not force the full approved-word list.
+**In conversation** (more freedom than reports; aim to teach):
+- **Plain language, roughly 80% of ASD-STE100.** Short sentences, active voice, no filler.
+  This is a guide, not a hard rule. Use longer sentences when they make an idea clearer.
+- **Explain as a teacher would.** Do not assume the reader knows every technique. The first
+  time a specialised term appears, give its basic idea in a sentence or two. This applies
+  to statistical methods (for example hierarchical Bayes, posterior predictive checks or
+  bootstrapping), model internals and training mechanics. Say what the term means, why it
+  is used here, and what to watch for. After that, use the term without repeating the
+  explanation.
 - **Show, do not only tell.** Explain with a diagram where one helps. For a long or
   structured explanation, prefer an HTML page over a wall of text.
 
 **In reports:**
-- **The same plain language as in conversation.**
+- **Plain language, about 80% of ASD-STE100.** Short sentences, one idea per sentence,
+  active voice, no filler.
 - **Order of preference: figure > table > narrative.** A figure beats a table. A table
   beats prose. Use narrative only for what a figure or table cannot carry.
 
