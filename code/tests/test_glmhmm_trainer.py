@@ -258,6 +258,29 @@ class TestFit(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._trainer("unused", num_workers=0)
 
+    def test_releasing_compiled_code_does_not_change_the_fit(self):
+        """Clearing JAX's caches between every subject (#119) gives the same scores."""
+        from unittest import mock
+
+        import jax
+        from model_trainers import glmhmm_trainer
+
+        scores, calls = [], []
+        real_clear = jax.clear_caches
+        for every in (1000, 1):
+            with tempfile.TemporaryDirectory() as out, \
+                    mock.patch.object(glmhmm_trainer, "RELEASE_EVERY", every), \
+                    mock.patch.object(jax, "clear_caches", side_effect=real_clear) as clear:
+                scores.append(self._trainer(out, num_workers=2).fit(self._bundle()))
+                calls.append(clear.call_count)
+        default, released = scores
+        for key in ("glmhmm/global/log_joint", "glmhmm/select/eval_likelihood",
+                    "heldout/eval_likelihood", "heldout/eval_log_lik_sum"):
+            self.assertEqual(default[key], released[key], key)
+        # Global fit, then one release per subject in each refit phase and the posterior pass.
+        self.assertGreater(calls[1], calls[0])
+        self.assertGreaterEqual(calls[1], 1 + 3 + 2 + 2)
+
     def test_per_subject_log_lik_sums_pool_to_the_headline(self):
         """Pooled per-subject log-lik sums and trial counts reproduce heldout/eval_likelihood."""
         with tempfile.TemporaryDirectory() as out:
