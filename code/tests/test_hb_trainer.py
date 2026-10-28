@@ -270,6 +270,62 @@ class TestHeldoutTwoLevel(unittest.TestCase):
         self.assertEqual(first, again)
         self.assertNotEqual(first, other)
 
+    def _rescore(self, **kwargs):
+        """Score the saved draws again, through the same data path, without fitting."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        run = self._Run()
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, eval_every_n=2,
+                            session_draws_per_posterior_draw=4, seed=0,
+                            draws_path=str(run_dir), **kwargs)
+        return trainer.fit(bundle, loggers={"wandb": run}), run.summary
+
+    def test_rescore_from_draws_reproduces_the_fit_exactly(self):
+        """Same seed and subjects: the saved draws give the original scores to the bit."""
+        output, summary = self._rescore()
+        self.assertEqual(summary["heldout/eval_log_lik_sum"],
+                         self.wandb_run.summary["heldout/eval_log_lik_sum"])
+        self.assertEqual(output["heldout_likelihood"]["matched"],
+                         self.output["heldout_likelihood"]["matched"])
+        self.assertEqual(summary["heldout/n_sessions_importance"], 0)
+
+    def test_importance_rescore_replaces_only_failing_sessions(self):
+        """Every session forced to fail: all are rescored, and the plain total is kept."""
+        from unittest import mock
+
+        with mock.patch("aind_dynamic_foraging_models.hierarchical_bayes.heldout."
+                        "pareto_k_threshold", return_value=-np.inf):
+            output, summary = self._rescore(importance_rescore=True, importance_draws=2000)
+        n_sessions = summary["heldout/n_sessions"]
+        self.assertEqual(summary["heldout/n_sessions_importance"], n_sessions)
+        self.assertEqual(summary["heldout/eval_log_lik_sum_plain"],
+                         self.wandb_run.summary["heldout/eval_log_lik_sum"])
+        self.assertNotEqual(summary["heldout/eval_log_lik_sum"],
+                            summary["heldout/eval_log_lik_sum_plain"])
+        self.assertAlmostEqual(
+            np.exp(summary["heldout/eval_log_lik_sum"] / summary["heldout/num_eval_trials"]),
+            summary["heldout/eval_likelihood"], places=6)
+        self.assertGreater(summary["heldout/eval_log_lik_sum_se"], 0.0)
+        for row in output["heldout_per_subject_matched"].values():
+            self.assertEqual(row["n_sessions_importance"], row["n_scored"])
+
+    def test_rescore_refuses_draws_of_other_subjects(self):
+        """Draws pair with sessions by position, so a different subject set must not load."""
+        (run_dir,) = list(Path(self.artifacts.name).iterdir())
+        bundle = DatasetBundle(
+            raw=None, train_set=None, eval_set=None, metadata={},
+            extras={"heldout_raw": _make_frame(n_subjects=1, n_sessions=4,
+                                               n_trials=50, seed=7)},
+        )
+        trainer = HBTrainer(estimator="heldout_two_level", num_chains=2, seed=0,
+                            draws_path=str(run_dir))
+        with self.assertRaises(ValueError):
+            trainer.fit(bundle)
+
     def test_requires_a_heldout_cohort(self):
         """Without held-out subjects there is nothing to fit."""
         bundle = DatasetBundle(raw=_make_frame(), train_set=None, eval_set=None, metadata={})
