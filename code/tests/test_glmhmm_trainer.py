@@ -258,6 +258,40 @@ class TestFit(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._trainer("unused", num_workers=0)
 
+    def test_a_loaded_global_fit_reproduces_the_scores(self):
+        """Loading an earlier run's global fit gives that run's selection and held-out scores."""
+        import shutil
+
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as fits, \
+                tempfile.TemporaryDirectory() as second:
+            original = self._trainer(first, save_posteriors=False).fit(self._bundle())
+            shutil.copy(Path(first) / "glmhmm" / "fit.json", Path(fits) / "hurdle_K2_L2.json")
+            rescored = self._trainer(second, save_posteriors=False,
+                                     global_fit_dir=fits).fit(self._bundle())
+            self.assertEqual(len(rescored["glmhmm/global/loaded_sha256"]), 64)
+            for key in ("glmhmm/global/log_joint", "glmhmm/select/eval_likelihood",
+                        "heldout/eval_likelihood", "heldout/zero_shot/eval_likelihood"):
+                # the GRU-shared scoring code works in float32
+                self.assertAlmostEqual(original[key], rescored[key], places=6, msg=key)
+            with self.assertRaises(ValueError):   # a file fitted with another K is refused
+                shutil.copy(Path(fits) / "hurdle_K2_L2.json", Path(fits) / "hurdle_K3_L2.json")
+                self._trainer(second, num_states=3, global_fit_dir=fits).fit(self._bundle())
+
+    def test_subject_prior_centre(self):
+        """Centring the refit prior on the global weights changes the refits; others refused."""
+        scores = {}
+        for centre in ("zero", "global"):
+            with tempfile.TemporaryDirectory() as out:
+                scores[centre] = self._trainer(out, subject_prior_center=centre,
+                                               save_posteriors=False).fit(self._bundle())
+        self.assertEqual(scores["global"]["glmhmm/subject_prior_center"], "global")
+        self.assertEqual(scores["zero"]["glmhmm/global/log_joint"],
+                         scores["global"]["glmhmm/global/log_joint"])   # global fit untouched
+        self.assertNotEqual(scores["zero"]["heldout/eval_likelihood"],
+                            scores["global"]["heldout/eval_likelihood"])
+        with self.assertRaises(ValueError):
+            self._trainer("unused", subject_prior_center="mean")
+
     def test_releasing_compiled_code_does_not_change_the_fit(self):
         """Clearing JAX's caches between every subject (#119) gives the same scores."""
         from unittest import mock
