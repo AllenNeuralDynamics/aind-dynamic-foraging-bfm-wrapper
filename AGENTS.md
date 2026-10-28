@@ -1,5 +1,29 @@
 # Global AGENTS.md
 
+## Explaining and Reporting Style
+
+Source: Karpathy's advice to ask for explanations in
+[ASD-STE100](https://www.asd-ste100.org/) (Simplified Technical English), at about 80%
+strictness.
+
+**In conversation** (more freedom than reports; aim to teach):
+- **Plain language, roughly 80% of ASD-STE100.** Short sentences, active voice, no filler.
+  This is a guide, not a hard rule. Use longer sentences when they make an idea clearer.
+- **Explain as a teacher would.** Do not assume the reader knows every technique. The first
+  time a specialised term appears, give its basic idea in a sentence or two. This applies
+  to statistical methods (for example hierarchical Bayes, posterior predictive checks or
+  bootstrapping), model internals and training mechanics. Say what the term means, why it
+  is used here, and what to watch for. After that, use the term without repeating the
+  explanation.
+- **Show, do not only tell.** Explain with a diagram where one helps. For a long or
+  structured explanation, prefer an HTML page over a wall of text.
+
+**In reports:**
+- **Plain language, about 80% of ASD-STE100.** Short sentences, one idea per sentence,
+  active voice, no filler.
+- **Order of preference: figure > table > narrative.** A figure beats a table. A table
+  beats prose. Use narrative only for what a figure or table cannot carry.
+
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 The four-principle backbone (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) is adapted from [multica-ai/andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills), which distills [Andrej Karpathy's observations](https://x.com/karpathy/status/2015883857489522876) on LLM coding pitfalls. HPC-specific rules and the commit-message convention below are local additions.
