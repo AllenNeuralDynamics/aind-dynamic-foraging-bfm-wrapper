@@ -422,6 +422,12 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
 
   The scores go through `rnn_utils` and `gru_trainer._threeway_likelihood_decomposition`, so
   each key is the GRU's formula.
+- **Workers** (`model.num_workers`, default 1): the restarts, then the per-subject refits,
+  run that many at a time in threads, with identical results. One CPU fit keeps about two
+  cores busy. On study 14's cohort, 10 workers finish the restarts 3× sooner on 8 cores and
+  5× on 32, and the refits 3× sooner; ten K = 10 restarts in threads use about 31 GB. So for
+  `num_workers=10` request about 32 cores and 64 GB
+  (AllenNeuralDynamics/aind-dynamic-foraging-models#86).
 - **Artifacts** (`output_dir/glmhmm/`):
   - `fit.json`: config, summary, global and per-subject parameters, the EM trace, and source SHAs;
   - `heldout_per_subject.csv`;

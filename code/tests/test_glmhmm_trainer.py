@@ -242,6 +242,22 @@ class TestFit(unittest.TestCase):
                              summary["heldout/eval_likelihood"])
             self.assertTrue((Path(out) / "glmhmm" / "fit.json").exists())
 
+    def test_workers_do_not_change_the_fit(self):
+        """Restarts and refits run in threads give exactly the one-at-a-time scores."""
+        scores = []
+        for workers in (1, 3):
+            with tempfile.TemporaryDirectory() as out:
+                scores.append(self._trainer(out, num_workers=workers,
+                                            save_posteriors=False).fit(self._bundle()))
+        serial, parallel = scores
+        for key in ("glmhmm/global/restart_log_joints", "glmhmm/global/restart_converged",
+                    "glmhmm/select/eval_likelihood", "heldout/eval_likelihood",
+                    "heldout/final/eval_likelihood_LR_engaged", "heldout/eval_log_lik_sum"):
+            self.assertEqual(serial[key], parallel[key], key)
+        self.assertEqual(len(serial["glmhmm/global/restart_converged"]), 2)
+        with self.assertRaises(ValueError):
+            self._trainer("unused", num_workers=0)
+
     def test_per_subject_log_lik_sums_pool_to_the_headline(self):
         """Pooled per-subject log-lik sums and trial counts reproduce heldout/eval_likelihood."""
         with tempfile.TemporaryDirectory() as out:
