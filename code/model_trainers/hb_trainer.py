@@ -312,6 +312,8 @@ def _load_two_level_draws(run_dir, subjects, expected=None):
             f"draws_path {run_dir} holds subjects {record['subject_ids']}, but this run scores "
             f"{[str(s) for s in subjects]}; rescore with the same data.test_subject_ids."
         )
+    # Fits saved before a setting was recorded used its default then.
+    record = {"hb_model": "hattori2019", **record}
     for key, value in (expected or {}).items():
         if key in record and record[key] != value:
             raise ValueError(
@@ -424,6 +426,7 @@ class HBTrainer(ModelTrainer):
         draws_path: Optional[str] = None,
         importance_rescore: bool = False,
         importance_draws: int = 24000,
+        hb_model: str = "hattori2019",
         architecture: Mapping[str, Any] | Any = {},
         output_dir: str = "/results/outputs",
         seed: Optional[int] = None,
@@ -514,6 +517,11 @@ class HBTrainer(ModelTrainer):
             it under ``*_plain`` keys.
         importance_draws : int
             Proposal draws per rescored session.
+        hb_model : str
+            **``heldout_two_level`` only.** The forager at the session level: ``"hattori2019"``
+            (default) or ``"ctt"`` (compare-to-threshold), as foraging-models'
+            ``get_model`` names them. Recorded with the draws; a rescore refuses draws of
+            another model.
         architecture : mapping
             Present for parity with the other trainers; unused.
         output_dir : str
@@ -558,6 +566,7 @@ class HBTrainer(ModelTrainer):
         self.draws_path = draws_path
         self.importance_rescore = bool(importance_rescore)
         self.importance_draws = int(importance_draws)
+        self.hb_model = str(hb_model)
         self.output_dir = output_dir
 
     def fit(
@@ -890,7 +899,7 @@ class HBTrainer(ModelTrainer):
             samples, diagnostics = _load_two_level_draws(
                 draws_dir, subjects,
                 expected={"eval_every_n": self.eval_every_n, "beta_max": self.beta_max,
-                          "sessions": split})
+                          "sessions": split, "hb_model": self.hb_model})
         else:
             samples, diagnostics = fit_heldout_two_level(
                 context_c, context_r, rng_key=key_fit, session_mask=ctx_session_mask,
@@ -898,7 +907,7 @@ class HBTrainer(ModelTrainer):
                 num_samples=self.num_samples, num_chains=self.num_chains,
                 beta_max=self.beta_max, progress_bar=self.progress_bar,
                 centered=self.centered, target_accept_prob=self.target_accept_prob,
-                max_tree_depth=self.max_tree_depth,
+                max_tree_depth=self.max_tree_depth, model=self.hb_model,
             )
         fit_seconds = time.time() - started
         # Saved before scoring, so a failure there cannot lose the fit. One subdirectory per
@@ -918,6 +927,7 @@ class HBTrainer(ModelTrainer):
                     "session_draws_per_posterior_draw": self.session_draws_per_posterior_draw,
                     "centered": self.centered, "target_accept_prob": self.target_accept_prob,
                     "max_tree_depth": self.max_tree_depth, "sessions": split,
+                    "hb_model": self.hb_model,
                     **_source_revisions(),
                 })
 
@@ -927,7 +937,7 @@ class HBTrainer(ModelTrainer):
         scored = batched_heldout_scores(
             samples, flat["subject_indices"], flat["choices"], flat["rewards"],
             valid_mask=flat["valid_mask"], rng_key=key_draw, beta_max=self.beta_max,
-            n_theta_per_draw=self.session_draws_per_posterior_draw,
+            n_theta_per_draw=self.session_draws_per_posterior_draw, model=self.hb_model,
         )
 
         n_draws = int(np.asarray(samples["mu_p"]).shape[0]) * self.session_draws_per_posterior_draw
@@ -957,7 +967,7 @@ class HBTrainer(ModelTrainer):
                     np.asarray(flat["choices"])[rows], np.asarray(flat["rewards"])[rows],
                     valid_mask=np.asarray(flat["valid_mask"])[rows],
                     rng_key=jax.random.fold_in(key_is, position), beta_max=self.beta_max,
-                    n_proposal=self.importance_draws,
+                    n_proposal=self.importance_draws, model=self.hb_model,
                 )
                 headline[rows] = result["session_marginal"]
                 is_se[rows] = result["session_marginal_se"]
@@ -1051,6 +1061,7 @@ class HBTrainer(ModelTrainer):
             "hb/divergences": diagnostics["divergences"],
             "hb/fit_seconds": float(fit_seconds),
             "hb/estimator": "heldout_two_level",
+            "hb/model": self.hb_model,
         }
         logger.info(
             "HBTrainer: heldout_two_level eval likelihood %.5f (se %.5f; trial-marginal %.5f); "
