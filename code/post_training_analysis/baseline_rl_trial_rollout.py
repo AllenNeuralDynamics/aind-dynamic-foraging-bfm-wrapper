@@ -2,7 +2,8 @@
 
 Replays each subject's fitted agent over that subject's observed choices and rewards and
 returns one row per trial, keyed like ``gru_trial_states`` (``ses_idx``, ``trial_idx``), so
-the two can be joined trial by trial. Built on the rollout helpers that
+the two can be joined trial by trial. The agents are binary: ignored trials (``action == 2``,
+in a 3-action table) are left out of the replay and come back with NaN probabilities and Q. Built on the rollout helpers that
 ``likelihood_advantage_analysis`` already uses for its baseline-RL side.
 
 Usage::
@@ -26,8 +27,9 @@ _KEY_COLUMNS = ["subject_id", "ses_idx", "trial_idx", "action", "reward"]
 
 
 def rollout_subject(fit: Mapping[str, Any], subject_trials: pd.DataFrame) -> pd.DataFrame:
-    """One subject's fitted agent over its trials: p_rl_left/right, and Q when recoverable."""
-    payloads = laa._session_rollout_payloads_from_trial_df(subject_trials[_KEY_COLUMNS])
+    """One subject's fitted agent over its engaged trials: p_rl_left/right, and Q when recoverable."""
+    engaged = subject_trials[subject_trials["action"].isin([0, 1])]
+    payloads = laa._session_rollout_payloads_from_trial_df(engaged[_KEY_COLUMNS])
     kwargs = dict(
         agent_class_name=fit["agent_class"], agent_kwargs=fit["agent_kwargs"],
         fitted_params=fit["fitted_params"],
@@ -47,6 +49,10 @@ def rollout_subject(fit: Mapping[str, Any], subject_trials: pd.DataFrame) -> pd.
             q_values = None
     frame = laa._probability_frame_from_rollout_sessions(
         payloads, choice_prob_sessions=probs, q_value_sessions=q_values)
+    # The shared helper numbers each session's trials 1..n; put the input's trial_idx back.
+    if list(frame["ses_idx"]) != [p["ses_idx"] for p in payloads for _ in p["trial_indices"]]:
+        raise AssertionError("Rollout rows are not in session payload order")
+    frame["trial_idx"] = np.concatenate([p["trial_indices"] for p in payloads]) if payloads else []
     return frame.drop(columns=["subject_id", "action", "p_rl"])
 
 
@@ -83,7 +89,7 @@ def rollout_baseline_rl(
     """All subjects of ``trial_df`` that ``baseline_output`` has a per-subject fit for.
 
     Raises if any subject in ``trial_df`` has no fit. Rows come back in ``trial_df``'s
-    order for the subjects present.
+    order for the subjects present; ignored trials (``action == 2``) have NaN columns.
     """
     fits = baseline_output["fitted_params_per_subject"]
     by_subject = trial_df.groupby(trial_df["subject_id"].astype(str), sort=False)
@@ -100,8 +106,9 @@ def rollout_baseline_rl(
     rl = pd.concat(parts, ignore_index=True)
     keys = trial_df[["ses_idx", "trial_idx"]].astype({"ses_idx": str})
     out = keys.merge(rl, on=["ses_idx", "trial_idx"], how="left", validate="1:1")
-    if out["p_rl_right"].isna().any():
-        raise AssertionError("Some trials received no baseline probability")
+    engaged = trial_df["action"].isin([0, 1]).to_numpy()
+    if out.loc[engaged, "p_rl_right"].isna().any():
+        raise AssertionError("Some engaged trials received no baseline probability")
     return out
 
 

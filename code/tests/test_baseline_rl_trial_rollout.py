@@ -66,6 +66,24 @@ class TestBaselineRlTrialRollout(unittest.TestCase):
         with self.assertRaises(ValueError):
             rollout_baseline_rl({"fitted_params_per_subject": {"m1": FIT}}, self.trials)
 
+    def test_trial_keys_with_gaps_are_kept(self) -> None:
+        gapped = self.trials.copy()
+        gapped["trial_idx"] = gapped["trial_idx"] * 3 + 10       # e.g. 13, 16, 19, ...
+        out = rollout_baseline_rl(self.output, gapped)
+        pd.testing.assert_frame_equal(out[["ses_idx", "trial_idx"]], gapped[["ses_idx", "trial_idx"]])
+        contiguous = rollout_baseline_rl(self.output, self.trials)
+        np.testing.assert_array_equal(out["p_rl_right"].to_numpy(), contiguous["p_rl_right"].to_numpy())
+
+    def test_ignored_trials_are_skipped_and_left_empty(self) -> None:
+        with_ignores = self.trials.copy()
+        ignored = with_ignores.index % 7 == 3
+        with_ignores.loc[ignored, ["action", "reward"]] = [2, 0.0]
+        out = rollout_baseline_rl(self.output, with_ignores)
+        pd.testing.assert_frame_equal(out[["ses_idx", "trial_idx"]], with_ignores[["ses_idx", "trial_idx"]])
+        self.assertTrue(out.loc[ignored, ["p_rl_left", "p_rl_right"]].isna().all().all())
+        engaged_only = rollout_baseline_rl(self.output, with_ignores[~ignored].reset_index(drop=True))
+        np.testing.assert_array_equal(out.loc[~ignored, "p_rl_right"].to_numpy(), engaged_only["p_rl_right"].to_numpy())
+
     def test_pooled_likelihood(self) -> None:
         self.assertAlmostEqual(pooled_likelihood(np.array([1, 0]), np.array([0.8, 0.4])), float(np.sqrt(0.8 * 0.6)))
 
