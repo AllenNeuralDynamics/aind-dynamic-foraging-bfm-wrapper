@@ -428,6 +428,26 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
   5× on 32, and the refits 3× sooner; ten K = 10 restarts in threads use about 31 GB. So for
   `num_workers=10` request about 32 cores and 64 GB
   (AllenNeuralDynamics/aind-dynamic-foraging-models#86).
+- **Refit prior centre** (`model.subject_prior_center`, default `zero`). With `zero`, the
+  per-subject refits' Gaussian weight prior is N(0, `prior_sigma_subject`²), as before. With
+  `global` it is centred on the global fit's weights, so a refit moves only as far from the
+  global fit as the subject's data require. `global` needs `aind-dynamic-foraging-models`
+  >= 0.27.0 (`Prior.mean`); the trainer refuses it at construction on an older install.
+- **Reusing a saved global fit** (`model.global_fit_dir`, default `null`). Loads
+  `<global_fit_dir>/<emission>_K<num_states>_L<n_lags>.json`, a copy of an earlier run's
+  `fit.json`, instead of fitting the global model again, then runs the refits and scores as
+  usual. Use it to rescore refit settings (for example, the prior centre) without repeating a
+  global fit that can take hours.
+  - The file is refused unless its `emission`, `num_states`, `n_lags`, `design`,
+    `num_newton_steps`, `prior_sigma_global`, `transition_alpha_global`, `stickiness`,
+    `num_restarts` and `init_noise` match this run's.
+  - It must also come from the same training sessions. New files record
+    `glmhmm/global/train_data_sha256`, a digest of the training sessions, and must match it.
+    Files written before that key existed are checked only by
+    `glmhmm/global/num_train_trials`, a weaker check, and the trainer warns.
+  - Logged: `glmhmm/global/loaded_from`, `glmhmm/global/loaded_sha256` (of the file) and
+    `glmhmm/global/loaded_data_check` (`train_data_sha256` or `num_train_trials`). Parameters
+    load in float64 and are checked to equal the saved values.
 - **Compiled-code releases.** XLA's CPU JIT maps memory for every compiled executable (about
   25 maps each) and never unmaps it, and a fit compiles one per bucket shape. The kernel caps a
   process at `vm.max_map_count` (65,530 on the HPC), so study 14's hurdle K ≥ 5 runs were killed
@@ -699,6 +719,11 @@ environment.
 > Add a dated entry (newest first) whenever you add or change a feature.
 
 ### 2026-10-28
+- **`GLMHMMTrainer`: `subject_prior_center` and `global_fit_dir`.** Refits can centre their
+  weight prior on the global fit (`global`; needs foraging-models >= 0.27.0), and a run can load
+  a saved global fit instead of fitting one, checked against this run's settings and training
+  sessions (`glmhmm/global/train_data_sha256`; older files by training-trial count). See §5
+  "glmhmm specifics".
 - **`GLMHMMTrainer` releases compiled code between phases and refit chunks (#119).** XLA's CPU
   JIT never unmaps an executable's memory, so long runs hit `vm.max_map_count`; the trainer now
   calls `jax.clear_caches()` after the global fit, every 100 subject refits and every 100
