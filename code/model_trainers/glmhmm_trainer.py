@@ -545,10 +545,14 @@ class GLMHMMTrainer(ModelTrainer):
             "glmhmm/global/restart_log_joints": [float(r.log_joint[-1]) for r in restarts],
             "glmhmm/global/restart_converged": [bool(r.converged) for r in restarts],
             "glmhmm/global/num_train_trials": int(sum(len(r["choices"]) for r in train_records)),
-            "glmhmm/global/train_data_sha256": _train_data_sha256(train_records),
             "glmhmm/global/fit_seconds": float(global_seconds),
             "glmhmm/subject_prior_center": self.subject_prior_center,
             **(loaded or {}),
+            # Only a fresh fit, or a loaded one whose digest matched, vouches for its training
+            # sessions; a count-checked legacy file passes on no digest it never had.
+            **({"glmhmm/global/train_data_sha256": _train_data_sha256(train_records)}
+               if loaded is None or loaded["glmhmm/global/loaded_data_check"] == "train_data_sha256"
+               else {}),
         }
 
         # K-selection score: the per-subject protocol on the training cohort.

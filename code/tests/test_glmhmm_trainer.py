@@ -301,6 +301,9 @@ class TestFit(unittest.TestCase):
                 old_file = self._trainer(second, save_posteriors=False,
                                          global_fit_dir=fits).fit(self._bundle())
             self.assertEqual(old_file["glmhmm/global/loaded_data_check"], "num_train_trials")
+            self.assertNotIn("glmhmm/global/train_data_sha256", old_file)   # never vouched for
+            self.assertEqual(rescored["glmhmm/global/train_data_sha256"],
+                             original["glmhmm/global/train_data_sha256"])
             self.assertEqual(rescored["glmhmm/global/loaded_data_check"], "train_data_sha256")
 
     @unittest.skipUnless(HAS_PRIOR_MEAN, "needs aind-dynamic-foraging-models >= 0.27.0")
