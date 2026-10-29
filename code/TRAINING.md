@@ -428,6 +428,17 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
   5× on 32, and the refits 3× sooner; ten K = 10 restarts in threads use about 31 GB. So for
   `num_workers=10` request about 32 cores and 64 GB
   (AllenNeuralDynamics/aind-dynamic-foraging-models#86).
+- **Compiled-code releases.** XLA's CPU JIT maps memory for every compiled executable (about
+  25 maps each) and never unmaps it, and a fit compiles one per bucket shape. The kernel caps a
+  process at `vm.max_map_count` (65,530 on the HPC), so study 14's hurdle K ≥ 5 runs were killed
+  with `LLVM ERROR: Unable to allocate section memory` (#119). The trainer calls
+  `jax.clear_caches()`, which returns the maps (10,481 → 509 after 399 shapes):
+  - after the global fit;
+  - after every `RELEASE_EVERY` (100) subject refits, between thread-pool chunks;
+  - every 100 subjects of the posterior pass.
+
+  Each release logs the process's map count. The cost is recompiling bucket shapes afterwards,
+  seconds per phase; scores are unchanged.
 - **Artifacts** (`output_dir/glmhmm/`):
   - `fit.json`: config, summary, global and per-subject parameters, the EM trace, and source SHAs;
   - `heldout_per_subject.csv`;
@@ -686,6 +697,12 @@ environment.
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change a feature.
+
+### 2026-10-28
+- **`GLMHMMTrainer` releases compiled code between phases and refit chunks (#119).** XLA's CPU
+  JIT never unmaps an executable's memory, so long runs hit `vm.max_map_count`; the trainer now
+  calls `jax.clear_caches()` after the global fit, every 100 subject refits and every 100
+  subjects of the posterior pass. See §5 "glmhmm specifics".
 
 ### 2026-10-27
 - **`GLMHMMTrainer` (`model.type: glmhmm`): GLM-HMM baseline over left/right/ignore (study 14).**

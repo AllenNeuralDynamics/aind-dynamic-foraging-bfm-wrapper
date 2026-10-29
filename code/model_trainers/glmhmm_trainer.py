@@ -48,6 +48,24 @@ logger = logging.getLogger(__name__)
 IGNORE = 2
 MATURE_STAGES = ("STAGE_FINAL", "GRADUATED")  # as utils.load_mice_database.MATURE_STAGES
 STAGE_COLUMN = "current_stage_actual"
+# Subjects refitted (and posterior passes run) between releases of compiled code. XLA's CPU JIT
+# maps memory for every executable (~25 maps each) and never unmaps it, and a fit compiles one
+# per bucket shape; the kernel caps a process at vm.max_map_count (65,530 on the HPC). Without
+# releases, K >= 5 runs on study 14's cohort were killed while writing posteriors (#119).
+RELEASE_EVERY = 100
+
+
+def _release_compiled(phase: str) -> None:
+    """Drop JAX's compiled executables, so their memory maps are returned to the kernel."""
+    import jax
+
+    jax.clear_caches()
+    try:
+        with open("/proc/self/maps") as maps:
+            n_maps = sum(1 for _ in maps)
+    except OSError:   # not Linux
+        return
+    logger.info("GLMHMMTrainer: released compiled code after %s (%d memory maps)", phase, n_maps)
 
 
 def _sessions(raw_df: pd.DataFrame, session_ids: List[Any]) -> List[Dict[str, Any]]:
@@ -356,10 +374,17 @@ class GLMHMMTrainer(ModelTrainer):
             }
 
         # Subjects are independent; results keep the subjects' order whatever num_workers is.
-        if self.num_workers > 1:
-            with ThreadPoolExecutor(self.num_workers) as pool:
-                return dict(zip(subjects, pool.map(refit, subjects)))
-        return {subject: refit(subject) for subject in subjects}
+        # Compiled code is released between chunks, never while worker threads run.
+        results = {}
+        for start in range(0, len(subjects), RELEASE_EVERY):
+            chunk = subjects[start:start + RELEASE_EVERY]
+            if self.num_workers > 1:
+                with ThreadPoolExecutor(self.num_workers) as pool:
+                    results.update(zip(chunk, pool.map(refit, chunk)))
+            else:
+                results.update((subject, refit(subject)) for subject in chunk)
+            _release_compiled(f"{start + len(chunk)} of {len(subjects)} subject refits")
+        return results
 
     def _pooled(self, refits, which="eval"):
         """Pooled score over every refitted subject's ``which`` sessions."""
@@ -408,6 +433,7 @@ class GLMHMMTrainer(ModelTrainer):
         )
         key = jax.random.PRNGKey(int(self.seed or 0))
         model, global_fit, restarts = self._fit_global(train_records, key)
+        _release_compiled("the global fit")
         global_seconds = time.time() - started
         logger.info("GLMHMMTrainer: global fit in %.0fs, log joint %.2f (%s)",
                     global_seconds, global_fit.log_joint[-1],
@@ -611,7 +637,9 @@ class GLMHMMTrainer(ModelTrainer):
         from aind_dynamic_foraging_models.glm_hmm import state_posteriors
 
         frames = []
-        for subject, res in refits.items():
+        for n, (subject, res) in enumerate(refits.items(), start=1):
+            if n % RELEASE_EVERY == 0:
+                _release_compiled(f"posteriors of {n} subjects")
             for split in ("train", "eval"):
                 records = res[f"{split}_records"]
                 posts = state_posteriors(model, res["fit"].params, self._buckets(records))

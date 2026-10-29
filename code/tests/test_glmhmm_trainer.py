@@ -258,6 +258,54 @@ class TestFit(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._trainer("unused", num_workers=0)
 
+    def test_releasing_compiled_code_does_not_change_the_fit(self):
+        """Clearing JAX's caches between every subject (#119) gives the same scores."""
+        from unittest import mock
+
+        import jax
+        from model_trainers import glmhmm_trainer
+
+        scores, calls = [], []
+        real_clear = jax.clear_caches
+        for every in (1000, 1):
+            with tempfile.TemporaryDirectory() as out, \
+                    mock.patch.object(glmhmm_trainer, "RELEASE_EVERY", every), \
+                    mock.patch.object(jax, "clear_caches", side_effect=real_clear) as clear:
+                scores.append(self._trainer(out, num_workers=2).fit(self._bundle()))
+                calls.append(clear.call_count)
+        default, released = scores
+        for key in ("glmhmm/global/log_joint", "glmhmm/select/eval_likelihood",
+                    "heldout/eval_likelihood", "heldout/eval_log_lik_sum"):
+            self.assertEqual(default[key], released[key], key)
+        # Global fit, then one release per subject in each refit phase and the posterior pass.
+        self.assertGreater(calls[1], calls[0])
+        self.assertGreaterEqual(calls[1], 1 + 3 + 2 + 2)
+
+    @unittest.skipUnless(Path("/proc/self/maps").exists(), "memory maps are read from Linux /proc")
+    def test_releasing_compiled_code_returns_its_memory_maps(self):
+        """Many bucket shapes compiled, then released: the process's map count falls back (#119)."""
+        from aind_dynamic_foraging_models.glm_hmm import GLMHMM, fit_em, make_buckets
+        from model_trainers.glmhmm_trainer import _release_compiled
+
+        def maps():
+            with open("/proc/self/maps") as f:
+                return sum(1 for _ in f)
+
+        model = GLMHMM(2, 2, "hurdle")
+        params, props = model.initialize()
+        rng = np.random.default_rng(0)
+        _release_compiled("setup")
+        before = maps()
+        for n_trials in range(64, 64 * 13, 64):       # 12 bucket shapes, each compiled anew
+            choices = rng.integers(0, 3, n_trials)
+            fit_em(model, params, props, make_buckets([(choices, rng.random(n_trials) < 0.4)], 2),
+                   max_iters=1)
+        compiled = maps()
+        _release_compiled("test")
+        released = maps()
+        self.assertGreater(compiled - before, 100)                 # compiling did map memory
+        self.assertLess(released - before, (compiled - before) / 4)  # and releasing returned it
+
     def test_per_subject_log_lik_sums_pool_to_the_headline(self):
         """Pooled per-subject log-lik sums and trial counts reproduce heldout/eval_likelihood."""
         with tempfile.TemporaryDirectory() as out:
