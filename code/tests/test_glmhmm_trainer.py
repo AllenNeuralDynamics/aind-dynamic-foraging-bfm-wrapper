@@ -276,6 +276,9 @@ class TestFit(unittest.TestCase):
             with self.assertRaises(ValueError):   # a file fitted with another K is refused
                 shutil.copy(Path(fits) / "hurdle_K2_L2.json", Path(fits) / "hurdle_K3_L2.json")
                 self._trainer(second, num_states=3, global_fit_dir=fits).fit(self._bundle())
+            with self.assertRaises(ValueError):   # and so is one fitted with another global prior
+                self._trainer(second, prior_sigma_global=1.0,
+                              global_fit_dir=fits).fit(self._bundle())
 
     def test_subject_prior_centre(self):
         """Centring the refit prior on the global weights changes the refits; others refused."""

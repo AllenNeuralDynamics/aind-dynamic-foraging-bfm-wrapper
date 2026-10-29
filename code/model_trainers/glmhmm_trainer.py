@@ -306,6 +306,13 @@ class GLMHMMTrainer(ModelTrainer):
         self.bucket_size = int(bucket_size)
         self.num_newton_steps = int(num_newton_steps)
         self.num_workers = int(num_workers)
+        if subject_prior_center == "global":
+            # Fail here, not after the global fit: the prior's centre needs Prior.mean.
+            from aind_dynamic_foraging_models.glm_hmm import Prior
+
+            if "mean" not in Prior._fields:
+                raise ImportError("subject_prior_center='global' needs aind-dynamic-foraging-"
+                                  "models >= 0.27.0 (Prior.mean)")
         self.subject_prior_center = subject_prior_center
         self.global_fit_dir = None if global_fit_dir is None else Path(global_fit_dir)
         self.select_on_train_subjects = bool(select_on_train_subjects)
@@ -356,20 +363,32 @@ class GLMHMMTrainer(ModelTrainer):
     def _load_global(self):
         """The global fit from ``global_fit_dir``, its file and the file's sha256."""
         from aind_dynamic_foraging_models.glm_hmm import GLMHMM, FitResult
+        from jax.experimental import enable_x64
 
         path = self.global_fit_dir / f"{self.emission}_K{self.num_states}_L{self.n_lags}.json"
         raw = path.read_bytes()
         saved = json.loads(raw)
-        for key in ("emission", "num_states", "n_lags", "design", "num_newton_steps"):
+        # The model, and every setting that shaped the global fit: fit.json records this
+        # trainer's config beside the loaded fit, so a mismatch would misattribute it.
+        for key in ("emission", "num_states", "n_lags", "design", "num_newton_steps",
+                    "prior_sigma_global", "transition_alpha_global", "stickiness",
+                    "num_restarts", "init_noise"):
             if saved["config"][key] != getattr(self, key):
                 raise ValueError(f"{path}: {key} is {saved['config'][key]!r}, this fit has "
                                  f"{getattr(self, key)!r}")
         g = saved["global"]
         model = GLMHMM(self.num_states, self.n_lags, self.emission, self.num_newton_steps)
-        params, _ = model.initialize(
-            initial_probs=np.asarray(g["initial_probs"]),
-            transition_matrix=np.asarray(g["transition_matrix"]),
-            **{k: np.asarray(v) for k, v in g["emissions"].items()})
+        saved_arrays = {"initial_probs": np.asarray(g["initial_probs"], np.float64),
+                        "transition_matrix": np.asarray(g["transition_matrix"], np.float64),
+                        **{k: np.asarray(v, np.float64) for k, v in g["emissions"].items()}}
+        with enable_x64():   # without it, jnp rounds the saved float64 parameters to float32
+            params, _ = model.initialize(**saved_arrays)
+        loaded = {"initial_probs": params.initial.probs,
+                  "transition_matrix": params.transitions.transition_matrix,
+                  **params.emissions._asdict()}
+        for name, value in saved_arrays.items():
+            if not np.array_equal(np.asarray(loaded[name]), value):
+                raise RuntimeError(f"{path}: {name} did not load exactly")
         fit = FitResult(params, np.asarray(saved["global_log_joint_trace"]),
                         bool(saved["summary"]["glmhmm/global/converged"]))
         return model, fit, path, hashlib.sha256(raw).hexdigest()
@@ -385,8 +404,9 @@ class GLMHMMTrainer(ModelTrainer):
             predictive_log_probs,
         )
 
-        prior = Prior(self.prior_sigma_subject, self.transition_alpha_subject, self.stickiness,
-                      global_params.emissions if self.subject_prior_center == "global" else None)
+        prior = Prior(self.prior_sigma_subject, self.transition_alpha_subject, self.stickiness)
+        if self.subject_prior_center == "global":   # Prior.mean needs foraging-models >= 0.27.0
+            prior = prior._replace(mean=global_params.emissions)
         _, props = model.initialize()
         subjects = []
         for subject in by_subject_train:
