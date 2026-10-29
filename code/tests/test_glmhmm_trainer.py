@@ -18,8 +18,10 @@ try:
     from model_trainers.glmhmm_trainer import GLMHMMTrainer
 
     HAS_GLMHMM = True
+    # Prior.mean (the global-centred refit prior) arrived in foraging-models 0.27.0.
+    HAS_PRIOR_MEAN = "mean" in aind_dynamic_foraging_models.glm_hmm.Prior._fields
 except ImportError:  # pragma: no cover - exercised only without the glmhmm extra
-    HAS_GLMHMM = False
+    HAS_GLMHMM = HAS_PRIOR_MEAN = False
 
 
 def _make_frame(subjects=("m0", "m1", "m2"), n_sessions=4, n_trials=80, seed=0, stage=True):
@@ -279,7 +281,29 @@ class TestFit(unittest.TestCase):
             with self.assertRaises(ValueError):   # and so is one fitted with another global prior
                 self._trainer(second, prior_sigma_global=1.0,
                               global_fit_dir=fits).fit(self._bundle())
+            # ... and one fitted on other training sessions: by the data digest, or for files
+            # written before it, by the training-trial count.
+            saved_path = Path(fits) / "hurdle_K2_L2.json"
+            saved = json.loads(saved_path.read_text())
+            for edit in ({"glmhmm/global/train_data_sha256": "0" * 64},
+                         {"glmhmm/global/train_data_sha256": None,
+                          "glmhmm/global/num_train_trials": 1}):
+                changed = {**saved, "summary": {**saved["summary"], **edit}}
+                if changed["summary"]["glmhmm/global/train_data_sha256"] is None:
+                    del changed["summary"]["glmhmm/global/train_data_sha256"]
+                saved_path.write_text(json.dumps(changed))
+                with self.assertRaises(ValueError):
+                    self._trainer(second, global_fit_dir=fits).fit(self._bundle())
+            legacy = {**saved, "summary": dict(saved["summary"])}
+            del legacy["summary"]["glmhmm/global/train_data_sha256"]
+            saved_path.write_text(json.dumps(legacy))
+            with self.assertLogs("model_trainers.glmhmm_trainer", "WARNING"):
+                old_file = self._trainer(second, save_posteriors=False,
+                                         global_fit_dir=fits).fit(self._bundle())
+            self.assertEqual(old_file["glmhmm/global/loaded_data_check"], "num_train_trials")
+            self.assertEqual(rescored["glmhmm/global/loaded_data_check"], "train_data_sha256")
 
+    @unittest.skipUnless(HAS_PRIOR_MEAN, "needs aind-dynamic-foraging-models >= 0.27.0")
     def test_subject_prior_centre(self):
         """Centring the refit prior on the global weights changes the refits; others refused."""
         scores = {}

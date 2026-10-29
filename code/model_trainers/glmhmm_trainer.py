@@ -69,6 +69,16 @@ def _release_compiled(phase: str) -> None:
     logger.info("GLMHMMTrainer: released compiled code after %s (%d memory maps)", phase, n_maps)
 
 
+def _train_data_sha256(records: List[Dict[str, Any]]) -> str:
+    """Digest of the global fit's training data: each session's ids, choices and rewards."""
+    h = hashlib.sha256()
+    for r in sorted(records, key=lambda r: (str(r["subject_id"]), str(r["ses_idx"]))):
+        h.update(f"{r['subject_id']}|{r['ses_idx']}|{len(r['choices'])}|".encode())
+        h.update(np.asarray(r["choices"], np.int8).tobytes())
+        h.update(np.asarray(r["rewards"], np.int8).tobytes())
+    return h.hexdigest()
+
+
 def _sessions(raw_df: pd.DataFrame, session_ids: List[Any]) -> List[Dict[str, Any]]:
     """One record per session, in ``session_ids`` order, every trial kept (ignores too).
 
@@ -360,8 +370,14 @@ class GLMHMMTrainer(ModelTrainer):
         )
         return model, best, results
 
-    def _load_global(self):
-        """The global fit from ``global_fit_dir``, its file and the file's sha256."""
+    def _load_global(self, train_records):
+        """The global fit from ``global_fit_dir``, its file, the file's sha256 and the data check.
+
+        The saved fit must have been made on exactly this run's training sessions, or its
+        scores would count sessions it was fitted on. Files that record
+        ``glmhmm/global/train_data_sha256`` are checked by it; older files only by their
+        training-trial count, and the check used is logged.
+        """
         from aind_dynamic_foraging_models.glm_hmm import GLMHMM, FitResult
         from jax.experimental import enable_x64
 
@@ -376,6 +392,20 @@ class GLMHMMTrainer(ModelTrainer):
             if saved["config"][key] != getattr(self, key):
                 raise ValueError(f"{path}: {key} is {saved['config'][key]!r}, this fit has "
                                  f"{getattr(self, key)!r}")
+        recorded = saved["summary"].get("glmhmm/global/train_data_sha256")
+        if recorded is not None:
+            check = "train_data_sha256"
+            if recorded != _train_data_sha256(train_records):
+                raise ValueError(f"{path}: fitted on other training sessions than this run's")
+        else:
+            check = "num_train_trials"
+            n_saved = saved["summary"]["glmhmm/global/num_train_trials"]
+            n_here = int(sum(len(r["choices"]) for r in train_records))
+            if n_saved != n_here:
+                raise ValueError(f"{path}: fitted on {n_saved} training trials, this run has "
+                                 f"{n_here}")
+            logger.warning("GLMHMMTrainer: %s predates the training-data digest; checked only "
+                           "its training-trial count (%d).", path, n_here)
         g = saved["global"]
         model = GLMHMM(self.num_states, self.n_lags, self.emission, self.num_newton_steps)
         saved_arrays = {"initial_probs": np.asarray(g["initial_probs"], np.float64),
@@ -391,7 +421,7 @@ class GLMHMMTrainer(ModelTrainer):
                 raise RuntimeError(f"{path}: {name} did not load exactly")
         fit = FitResult(params, np.asarray(saved["global_log_joint_trace"]),
                         bool(saved["summary"]["glmhmm/global/converged"]))
-        return model, fit, path, hashlib.sha256(raw).hexdigest()
+        return model, fit, path, hashlib.sha256(raw).hexdigest(), check
 
     def _refit_subjects(self, model, global_params, by_subject_train, by_subject_eval):
         """Per-subject MAP refits from the global fit; one-step predictive on eval sessions.
@@ -492,9 +522,10 @@ class GLMHMMTrainer(ModelTrainer):
         key = jax.random.PRNGKey(int(self.seed or 0))
         loaded = None
         if self.global_fit_dir is not None:
-            model, global_fit, path, digest = self._load_global()
+            model, global_fit, path, digest, check = self._load_global(train_records)
             restarts, loaded = [global_fit], {"glmhmm/global/loaded_from": str(path),
-                                              "glmhmm/global/loaded_sha256": digest}
+                                              "glmhmm/global/loaded_sha256": digest,
+                                              "glmhmm/global/loaded_data_check": check}
         else:
             model, global_fit, restarts = self._fit_global(train_records, key)
         _release_compiled("the global fit")
@@ -514,6 +545,7 @@ class GLMHMMTrainer(ModelTrainer):
             "glmhmm/global/restart_log_joints": [float(r.log_joint[-1]) for r in restarts],
             "glmhmm/global/restart_converged": [bool(r.converged) for r in restarts],
             "glmhmm/global/num_train_trials": int(sum(len(r["choices"]) for r in train_records)),
+            "glmhmm/global/train_data_sha256": _train_data_sha256(train_records),
             "glmhmm/global/fit_seconds": float(global_seconds),
             "glmhmm/subject_prior_center": self.subject_prior_center,
             **(loaded or {}),
