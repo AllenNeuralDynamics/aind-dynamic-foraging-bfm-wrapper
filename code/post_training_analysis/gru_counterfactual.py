@@ -57,9 +57,15 @@ def load_gru_split(model_dir: str | Path, *, split: str = "eval",
     xs = np.asarray(payload["dataset"].get_all()["xs"], dtype=np.float32)
     if xs.shape[1] != len(session_ids):
         raise AssertionError(f"xs has {xs.shape[1]} sessions, split has {len(session_ids)}")
-    offset = 2 if run.session_conditioning_enabled else 1
+    offset = _feature_offset(run)
     n_actions = 2 if ignore_policy == "exclude" else 3
     return GruSplit(run, make_network, params, xs, session_ids, n_trials, offset, offset + 1, n_actions)
+
+
+def _feature_offset(run) -> int:
+    """Index of "previous choice" in xs: after the subject index (multisubject runs only) and
+    the session index (when session conditioning is on); "previous reward" follows it."""
+    return int(bool(run.multisubject)) + int(bool(run.session_conditioning_enabled))
 
 
 def logits(split: GruSplit, xs: np.ndarray | None = None, *, batch: int = 512) -> np.ndarray:

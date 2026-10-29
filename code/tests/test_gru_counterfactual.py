@@ -17,6 +17,7 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 from models.gru_network import make_gru_network  # noqa: E402
 from post_training_analysis.gru_counterfactual import (  # noqa: E402
+    _feature_offset,
     GruSplit, input_edit_effects, logits, readouts)
 
 N_SUBJECTS, T, S, H, E = 3, 12, 4, 8, 4
@@ -76,6 +77,19 @@ class TestInputEdits(unittest.TestCase):
             np.testing.assert_allclose(effects[name][0, valid], expected[valid], atol=1e-5)
             self.assertTrue(np.isnan(effects[name][0, ~valid]).all())
         self.assertGreater(np.abs(effects["engage"][0, 0]), 0)
+
+
+class TestFeatureOffset(unittest.TestCase):
+    """Where "previous choice" sits in xs: after the subject index and the session index, if any."""
+
+    def test_single_subject_has_no_index_columns(self) -> None:
+        from types import SimpleNamespace  # noqa: PLC0415
+        self.assertEqual(_feature_offset(SimpleNamespace(multisubject=False, session_conditioning_enabled=False)), 0)
+
+    def test_multisubject_adds_subject_then_session_index(self) -> None:
+        from types import SimpleNamespace  # noqa: PLC0415
+        self.assertEqual(_feature_offset(SimpleNamespace(multisubject=True, session_conditioning_enabled=False)), 1)
+        self.assertEqual(_feature_offset(SimpleNamespace(multisubject=True, session_conditioning_enabled=True)), 2)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,13 @@ _PASSTHROUGH_COLUMNS = ("trial", "source_ses_idx", "subject_session_index", "sub
 RESPONSE_COLUMNS = ("reaction_time", "log_reaction_time", "n_lick_left", "n_lick_right")
 # Per-action columns in action-index order (0 = left, 1 = right, 2 = ignore).
 PROBABILITY_COLUMNS = ("p_model1_left", "p_model1_right", "p_model1_ignore")
+# The history columns ``add_candidate_variables`` adds. A split with no engaged trial has
+# nothing to compute them from, so they are added empty (all NaN on the ignored rows).
+CANDIDATE_COLUMNS = (
+    "prev_outcome", "prev_action", "switch", "recent_reward_rate_3", "recent_reward_rate_5",
+    "recent_reward_rate_10", "trials_since_reward", "recent_switch_rate_5", "trial_position",
+    "history_pattern_1", "history_pattern_2", "history_pattern_3", "switch_x_prev_outcome",
+)
 IGNORE = 2
 
 
@@ -146,7 +153,11 @@ def build_trial_states_table(
         raise AssertionError("A 3-action GRU steps through every trial; found responses outside 0/1/2.")
     out["trial_idx"] = out.groupby("ses_idx", sort=False).cumcount() + 1
 
-    canonical = add_candidate_variables(_build_canonical_trial_dataframe(out, metadata=metadata))
+    engaged = _build_canonical_trial_dataframe(out, metadata=metadata)
+    if len(engaged):
+        canonical = add_candidate_variables(engaged)
+    else:   # only ignored trials (3-action head): no history to compute
+        canonical = engaged.reindex(columns=[*engaged.columns, *CANDIDATE_COLUMNS])
     canonical = _with_ignored_trials(canonical, out)
 
     latent_columns = [f"latent_{i}" for i in range(_count_prefixed(out, "latent_"))]
@@ -239,13 +250,21 @@ def readout_reconstruction_error(trial_df: pd.DataFrame, params_path: str | Path
     """
     from evaluation.common import _load_saved_params  # noqa: PLC0415
 
-    params = _load_saved_params(Path(params_path))
-    readout = next(v for k, v in params.items() if k.endswith("/readout"))
+    readout = _readout_params(_load_saved_params(Path(params_path)))
     states = trial_df[state_columns(trial_df)].to_numpy(dtype=np.float64)
     logits = states @ np.asarray(readout["w"], dtype=np.float64) + np.asarray(readout["b"])
     n_actions = _count_prefixed(trial_df, "choice_logit_")
     observed = trial_df[[f"choice_logit_{k}" for k in range(n_actions)]].to_numpy(dtype=np.float64)
     return float(np.max(np.abs(logits - observed)))
+
+
+def _readout_params(params: dict[str, Any]) -> dict[str, Any]:
+    """The output layer's ``{w, b}``: ``*/readout`` in a multisubject GRU, the unnamed ``linear``
+    of the single-subject ``hk.DeepRNN([GRU, Linear])``. Exactly one must match."""
+    matches = [k for k in params if k.endswith("/readout") or k == "linear" or k.endswith("/~/linear")]
+    if len(matches) != 1:
+        raise ValueError(f"Expected one GRU readout layer, found {matches or 'none'} in {sorted(params)}")
+    return params[matches[0]]
 
 
 def _count_prefixed(df: pd.DataFrame, prefix: str) -> int:

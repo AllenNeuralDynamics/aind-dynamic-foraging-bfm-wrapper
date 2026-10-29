@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from post_training_analysis.gru_trial_states import (
+    _readout_params,
     RESPONSE_COLUMNS,
     build_trial_states_table,
     pooled_trial_likelihood,
@@ -149,6 +150,24 @@ class TestGruTrialStatesThreeAction(unittest.TestCase):
         self.assertEqual(set(s2["session_id"]), {"s2"})
         self.assertEqual(set(s2["subject_id"]), {"m2"})
 
+    def test_candidate_columns_match_add_candidate_variables(self) -> None:
+        from post_training_analysis.gru_trial_states import (  # noqa: PLC0415
+            CANDIDATE_COLUMNS, _build_canonical_trial_dataframe, _sort_raw_dataframe, add_candidate_variables)
+        out = _sort_raw_dataframe(self.output_df)
+        out["trial_idx"] = out.groupby("ses_idx", sort=False).cumcount() + 1
+        base = _build_canonical_trial_dataframe(out, metadata={})
+        added = [c for c in add_candidate_variables(base).columns if c not in base.columns]
+        self.assertEqual(tuple(added), CANDIDATE_COLUMNS)
+
+    def test_split_with_only_ignored_trials_returns_every_timestep(self) -> None:
+        output_df = _output_df(READOUT_W3, READOUT_B3)
+        output_df["animal_response"] = 2
+        table = build_trial_states_table(output_df, metadata={})
+        self.assertEqual(len(table), len(output_df))
+        self.assertTrue((table["action"] == 2).all())
+        self.assertTrue(table["prev_action"].isna().all())
+        self.assertEqual(set(table["session_id"]), {"s1", "s2"})
+
     def test_engaged_history_skips_the_ignored_trial(self) -> None:
         # Long enough to clear add_candidate_variables' 10-trial history warm-up.
         table = build_trial_states_table(
@@ -179,6 +198,23 @@ class TestGruTrialStatesThreeAction(unittest.TestCase):
                 "net/~/readout": {"w": READOUT_W3.tolist(), "b": READOUT_B3.tolist()},
             }))
             self.assertLess(readout_reconstruction_error(self.table, params_path), 1e-5)
+
+
+class TestReadoutParams(unittest.TestCase):
+    """The output layer of both saved GRU layouts: multisubject (named readout) and single-subject."""
+
+    def test_multisubject_readout_is_named(self) -> None:
+        params = {"multisubject_gru/~/gru": {"w_i": 0}, "multisubject_gru/~/readout": {"w": 1, "b": 2}}
+        self.assertEqual(_readout_params(params), {"w": 1, "b": 2})
+
+    def test_single_subject_readout_is_the_unnamed_linear(self) -> None:
+        self.assertEqual(_readout_params({"gru": {"w_i": 0}, "linear": {"w": 1, "b": 2}}), {"w": 1, "b": 2})
+
+    def test_ambiguous_or_missing_readout_is_an_error(self) -> None:
+        with self.assertRaises(ValueError):
+            _readout_params({"gru": {}, "a/~/readout": {}, "linear": {}})
+        with self.assertRaises(ValueError):
+            _readout_params({"gru": {}})
 
 
 if __name__ == "__main__":
