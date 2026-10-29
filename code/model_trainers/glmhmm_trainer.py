@@ -30,6 +30,7 @@ marshals data, runs the fits, and reports.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -66,6 +67,16 @@ def _release_compiled(phase: str) -> None:
     except OSError:   # not Linux
         return
     logger.info("GLMHMMTrainer: released compiled code after %s (%d memory maps)", phase, n_maps)
+
+
+def _train_data_sha256(records: List[Dict[str, Any]]) -> str:
+    """Digest of the global fit's training data: each session's ids, choices and rewards."""
+    h = hashlib.sha256()
+    for r in sorted(records, key=lambda r: (str(r["subject_id"]), str(r["ses_idx"]))):
+        h.update(f"{r['subject_id']}|{r['ses_idx']}|{len(r['choices'])}|".encode())
+        h.update(np.asarray(r["choices"], np.int8).tobytes())
+        h.update(np.asarray(r["rewards"], np.int8).tobytes())
+    return h.hexdigest()
 
 
 def _sessions(raw_df: pd.DataFrame, session_ids: List[Any]) -> List[Dict[str, Any]]:
@@ -216,6 +227,8 @@ class GLMHMMTrainer(ModelTrainer):
         bucket_size: int = 64,
         num_newton_steps: int = 5,
         num_workers: int = 1,
+        subject_prior_center: str = "zero",
+        global_fit_dir: Optional[str] = None,
         select_on_train_subjects: bool = True,
         save_posteriors: bool = True,
         architecture: Mapping[str, Any] | Any = {},
@@ -259,6 +272,14 @@ class GLMHMMTrainer(ModelTrainer):
             refits. The fits do not depend on it. One CPU fit keeps about two cores busy; at
             4.9M trials and K = 10, ten workers finish the restarts 3x sooner on 8 cores and
             5x on 32.
+        subject_prior_center : {"zero", "global"}
+            Centre of the per-subject refits' Gaussian prior on the GLM weights: zero (Ashwood
+            et al.), or the global fit's weights, so a subject with little data stays near the
+            shared states instead of near "no history effect".
+        global_fit_dir : str, optional
+            Load the global fit from ``<dir>/<emission>_K<num_states>_L<n_lags>.json`` (a copy of
+            an earlier run's ``fit.json``) instead of fitting it; its sha256 is recorded. For
+            rescoring the per-subject protocol without repeating the global fit.
         select_on_train_subjects : bool
             Also run the per-subject protocol on the training cohort (the K-selection score).
         save_posteriors : bool
@@ -276,6 +297,9 @@ class GLMHMMTrainer(ModelTrainer):
             raise ValueError(f"emission must be 'hurdle' or 'reference'; got {emission!r}")
         if num_states < 1 or n_lags < 1 or num_workers < 1:
             raise ValueError("num_states, n_lags and num_workers must be positive")
+        if subject_prior_center not in ("zero", "global"):
+            raise ValueError("subject_prior_center must be 'zero' or 'global'; "
+                             f"got {subject_prior_center!r}")
         self.num_states = int(num_states)
         self.emission = emission
         self.design = design
@@ -292,6 +316,15 @@ class GLMHMMTrainer(ModelTrainer):
         self.bucket_size = int(bucket_size)
         self.num_newton_steps = int(num_newton_steps)
         self.num_workers = int(num_workers)
+        if subject_prior_center == "global":
+            # Fail here, not after the global fit: the prior's centre needs Prior.mean.
+            from aind_dynamic_foraging_models.glm_hmm import Prior
+
+            if "mean" not in Prior._fields:
+                raise ImportError("subject_prior_center='global' needs aind-dynamic-foraging-"
+                                  "models >= 0.27.0 (Prior.mean)")
+        self.subject_prior_center = subject_prior_center
+        self.global_fit_dir = None if global_fit_dir is None else Path(global_fit_dir)
         self.select_on_train_subjects = bool(select_on_train_subjects)
         self.save_posteriors = bool(save_posteriors)
         self.output_dir = Path(output_dir)
@@ -337,6 +370,59 @@ class GLMHMMTrainer(ModelTrainer):
         )
         return model, best, results
 
+    def _load_global(self, train_records):
+        """The global fit from ``global_fit_dir``, its file, the file's sha256 and the data check.
+
+        The saved fit must have been made on exactly this run's training sessions, or its
+        scores would count sessions it was fitted on. Files that record
+        ``glmhmm/global/train_data_sha256`` are checked by it; older files only by their
+        training-trial count, and the check used is logged.
+        """
+        from aind_dynamic_foraging_models.glm_hmm import GLMHMM, FitResult
+        from jax.experimental import enable_x64
+
+        path = self.global_fit_dir / f"{self.emission}_K{self.num_states}_L{self.n_lags}.json"
+        raw = path.read_bytes()
+        saved = json.loads(raw)
+        # The model, and every setting that shaped the global fit: fit.json records this
+        # trainer's config beside the loaded fit, so a mismatch would misattribute it.
+        for key in ("emission", "num_states", "n_lags", "design", "num_newton_steps",
+                    "prior_sigma_global", "transition_alpha_global", "stickiness",
+                    "num_restarts", "init_noise"):
+            if saved["config"][key] != getattr(self, key):
+                raise ValueError(f"{path}: {key} is {saved['config'][key]!r}, this fit has "
+                                 f"{getattr(self, key)!r}")
+        recorded = saved["summary"].get("glmhmm/global/train_data_sha256")
+        if recorded is not None:
+            check = "train_data_sha256"
+            if recorded != _train_data_sha256(train_records):
+                raise ValueError(f"{path}: fitted on other training sessions than this run's")
+        else:
+            check = "num_train_trials"
+            n_saved = saved["summary"]["glmhmm/global/num_train_trials"]
+            n_here = int(sum(len(r["choices"]) for r in train_records))
+            if n_saved != n_here:
+                raise ValueError(f"{path}: fitted on {n_saved} training trials, this run has "
+                                 f"{n_here}")
+            logger.warning("GLMHMMTrainer: %s predates the training-data digest; checked only "
+                           "its training-trial count (%d).", path, n_here)
+        g = saved["global"]
+        model = GLMHMM(self.num_states, self.n_lags, self.emission, self.num_newton_steps)
+        saved_arrays = {"initial_probs": np.asarray(g["initial_probs"], np.float64),
+                        "transition_matrix": np.asarray(g["transition_matrix"], np.float64),
+                        **{k: np.asarray(v, np.float64) for k, v in g["emissions"].items()}}
+        with enable_x64():   # without it, jnp rounds the saved float64 parameters to float32
+            params, _ = model.initialize(**saved_arrays)
+        loaded = {"initial_probs": params.initial.probs,
+                  "transition_matrix": params.transitions.transition_matrix,
+                  **params.emissions._asdict()}
+        for name, value in saved_arrays.items():
+            if not np.array_equal(np.asarray(loaded[name]), value):
+                raise RuntimeError(f"{path}: {name} did not load exactly")
+        fit = FitResult(params, np.asarray(saved["global_log_joint_trace"]),
+                        bool(saved["summary"]["glmhmm/global/converged"]))
+        return model, fit, path, hashlib.sha256(raw).hexdigest(), check
+
     def _refit_subjects(self, model, global_params, by_subject_train, by_subject_eval):
         """Per-subject MAP refits from the global fit; one-step predictive on eval sessions.
 
@@ -349,6 +435,8 @@ class GLMHMMTrainer(ModelTrainer):
         )
 
         prior = Prior(self.prior_sigma_subject, self.transition_alpha_subject, self.stickiness)
+        if self.subject_prior_center == "global":   # Prior.mean needs foraging-models >= 0.27.0
+            prior = prior._replace(mean=global_params.emissions)
         _, props = model.initialize()
         subjects = []
         for subject in by_subject_train:
@@ -432,7 +520,14 @@ class GLMHMMTrainer(ModelTrainer):
             self.n_lags,
         )
         key = jax.random.PRNGKey(int(self.seed or 0))
-        model, global_fit, restarts = self._fit_global(train_records, key)
+        loaded = None
+        if self.global_fit_dir is not None:
+            model, global_fit, path, digest, check = self._load_global(train_records)
+            restarts, loaded = [global_fit], {"glmhmm/global/loaded_from": str(path),
+                                              "glmhmm/global/loaded_sha256": digest,
+                                              "glmhmm/global/loaded_data_check": check}
+        else:
+            model, global_fit, restarts = self._fit_global(train_records, key)
         _release_compiled("the global fit")
         global_seconds = time.time() - started
         logger.info("GLMHMMTrainer: global fit in %.0fs, log joint %.2f (%s)",
@@ -451,6 +546,13 @@ class GLMHMMTrainer(ModelTrainer):
             "glmhmm/global/restart_converged": [bool(r.converged) for r in restarts],
             "glmhmm/global/num_train_trials": int(sum(len(r["choices"]) for r in train_records)),
             "glmhmm/global/fit_seconds": float(global_seconds),
+            "glmhmm/subject_prior_center": self.subject_prior_center,
+            **(loaded or {}),
+            # Only a fresh fit, or a loaded one whose digest matched, vouches for its training
+            # sessions; a count-checked legacy file passes on no digest it never had.
+            **({"glmhmm/global/train_data_sha256": _train_data_sha256(train_records)}
+               if loaded is None or loaded["glmhmm/global/loaded_data_check"] == "train_data_sha256"
+               else {}),
         }
 
         # K-selection score: the per-subject protocol on the training cohort.
@@ -575,7 +677,7 @@ class GLMHMMTrainer(ModelTrainer):
                 "num_states", "emission", "design", "n_lags", "prior_sigma_global",
                 "transition_alpha_global", "prior_sigma_subject", "transition_alpha_subject",
                 "stickiness", "num_restarts", "init_noise", "em_tol", "max_em_iters",
-                "bucket_size", "num_newton_steps", "num_workers", "seed",
+                "bucket_size", "num_newton_steps", "num_workers", "subject_prior_center", "seed",
             )
         }
 
