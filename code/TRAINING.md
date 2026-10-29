@@ -80,6 +80,11 @@ These are **not the same knob.** The *"Skipping held-out evaluation … seen-sub
 personalization only"* log line refers to the **first** (per-checkpoint eval); the
 second still runs and produces `heldout/final/eval_likelihood`. Full detail in §8.
 
+Both switches apply to the RNN models (`gru`, `disrnn`) only. `hb` and `glmhmm` score
+held-out subjects inside `fit()`, from the cohort the runner loads into
+`bundle.extras["heldout_raw"]`, so they log `heldout/*` regardless of
+`auto_heldout_finetune` (§5).
+
 - **Held-out-mouse likelihood is the correct figure of merit** for generalization
   questions; within-subject `checkpoint/eval_likelihood` **saturates** (~0.72–0.75
   across model sizes) and cannot discriminate. Read `heldout/final/eval_likelihood`.
@@ -308,6 +313,7 @@ scores the complete suffix.
 | `gru` | `model_trainers.gru_trainer.GruTrainer` | GRU baseline; `num_layers` must be 1 |
 | `disrnn` | `model_trainers.disrnn_trainer.DisrnnTrainer` | Disentangled RNN with information-bottleneck penalties + warmup phase |
 | `baseline_rl` | `model_trainers.baseline_rl_trainer.BaselineRLTrainer` | Classic RL agents (e.g. `ForagerQLearning`) fit by differential evolution |
+| `glmhmm` | `model_trainers.glmhmm_trainer.GLMHMMTrainer` | GLM-HMM over left/right/ignore (Ashwood et al. 2022): global fit, then per-subject MAP refits; needs `ignore_policy=include` |
 
 ### Shared base class
 `GruTrainer` and `DisrnnTrainer` both subclass **`BaseMultisubjectTrainer`**
@@ -370,6 +376,95 @@ evolution — **one agent fit per subject**, independently (no shared model/embe
   (parity with the NN models) and writing artifacts under `outputs/heldout_test/`.
   This replaces the older transfer-based held-out eval (apply trained params to
   held-out), which is retired from the run path.
+
+### glmhmm specifics
+An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
+`aind-dynamic-foraging-models` `glm_hmm`; install that package with its `[glmhmm]` extra
+(dynamax plus one pinned `tfp-nightly`; the Beaker image installs `[bayes,glmhmm]`).
+
+    python -m run_hpc data=mice_snapshot_scaling data.ignore_policy=include model=glmhmm
+
+- **Device.** It runs on the CPU unless `AIND_GLMHMM_DEVICE=gpu` (default `cpu`). The CUDA
+  libraries pip resolves for jax 0.6.1 pair cuBLAS 12.8 with a cuSOLVER from CUDA 12.9, and
+  every GPU linear solve then fails (`gpusolverDnCreate ... cuSolver internal error`). This
+  includes the shared HPC env and the main Beaker image.
+  - The GLM-HMM Beaker image (`beaker/glmhmm/Dockerfile`) pins the solver libraries, so use
+    the GPU there.
+  - On study 14's 4.9M-trial cohort, a K = 10 global fit takes about 1.4–2.6 h on a GPU
+    against 7–8 h on 8 CPU cores.
+  - Per-mouse refits run about twice as fast on the CPU (#111).
+- **Data.** Needs `data.ignore_policy=include` (the trainer refuses `exclude`): ignore is an
+  outcome, and every session the 3-way GRU sees is kept. For a mature / non-mature split of the
+  score, add `current_stage_actual` to `data.cols_to_retain` (the default list projects it
+  out; the trainer warns when it is missing).
+- **Emissions** (`model.emission`): `hurdle` (per state, an engagement GLM on unsigned history
+  times a side GLM on signed history) or `reference` (per state, one multinomial GLM with ignore
+  as the zero logit). The history regressors are RewC/UnrC lags (signed) and Ignored/Rewarded
+  lags (unsigned), `model.n_lags` each, plus a bias.
+- **Protocol** (every score is the forward filter's one-step predictive):
+  1. Global fit on the training cohort's **train** sessions (`metadata["train_session_ids"]`),
+     with prior `prior_sigma_global` / `transition_alpha_global`. K = 1 runs first; K > 1 starts
+     from its weights plus `init_noise`, over `num_restarts` starts. Logged as `glmhmm/global/*`.
+  2. Zero-shot: the global fit scores each held-out subject's eval sessions →
+     `heldout/zero_shot/*`. These are the same trials as the matched score. It is **not**
+     `heldout/test_likelihood`: the GRU fills that key from every held-out session, so one key
+     would carry two trial sets.
+  3. Matched: a MAP refit per held-out subject (`prior_sigma_subject`,
+     `transition_alpha_subject`), started from the global fit, on its train sessions; its eval
+     sessions are scored. Logged as `heldout/eval_likelihood`, the GRU's
+     `heldout/final/{eval_likelihood, eval_likelihood_LR_engaged, eval_likelihood_engage,
+     engage_ignore_*}`, the pooling pair `heldout/eval_log_lik_sum` and
+     `heldout/num_eval_trials`, `heldout/final/*_{mature,nonmature}`, and the
+     `heldout/per_subject` table. The split is the held-out loader's own
+     (`bundle.extras["heldout_metadata"]`).
+  4. K selection (`select_on_train_subjects`): the same refit protocol on the training cohort →
+     `glmhmm/select/*`. Never the held-out subjects, and never the global fit's likelihood.
+
+  The scores go through `rnn_utils` and `gru_trainer._threeway_likelihood_decomposition`, so
+  each key is the GRU's formula.
+- **Workers** (`model.num_workers`, default 1): the restarts, then the per-subject refits,
+  run that many at a time in threads, with identical results. One CPU fit keeps about two
+  cores busy. On study 14's cohort, 10 workers finish the restarts 3× sooner on 8 cores and
+  5× on 32, and the refits 3× sooner; ten K = 10 restarts in threads use about 31 GB. So for
+  `num_workers=10` request about 32 cores and 64 GB
+  (AllenNeuralDynamics/aind-dynamic-foraging-models#86).
+- **Refit prior centre** (`model.subject_prior_center`, default `zero`). With `zero`, the
+  per-subject refits' Gaussian weight prior is N(0, `prior_sigma_subject`²), as before. With
+  `global` it is centred on the global fit's weights, so a refit moves only as far from the
+  global fit as the subject's data require. `global` needs `aind-dynamic-foraging-models`
+  >= 0.27.0 (`Prior.mean`); the trainer refuses it at construction on an older install.
+- **Reusing a saved global fit** (`model.global_fit_dir`, default `null`). Loads
+  `<global_fit_dir>/<emission>_K<num_states>_L<n_lags>.json`, a copy of an earlier run's
+  `fit.json`, instead of fitting the global model again, then runs the refits and scores as
+  usual. Use it to rescore refit settings (for example, the prior centre) without repeating a
+  global fit that can take hours.
+  - The file is refused unless its `emission`, `num_states`, `n_lags`, `design`,
+    `num_newton_steps`, `prior_sigma_global`, `transition_alpha_global`, `stickiness`,
+    `num_restarts` and `init_noise` match this run's.
+  - It must also come from the same training sessions. New files record
+    `glmhmm/global/train_data_sha256`, a digest of the training sessions, and must match it.
+    Files written before that key existed are checked only by
+    `glmhmm/global/num_train_trials`, a weaker check, and the trainer warns.
+  - Logged: `glmhmm/global/loaded_from`, `glmhmm/global/loaded_sha256` (of the file) and
+    `glmhmm/global/loaded_data_check` (`train_data_sha256` or `num_train_trials`). Parameters
+    load in float64 and are checked to equal the saved values.
+- **Compiled-code releases.** XLA's CPU JIT maps memory for every compiled executable (about
+  25 maps each) and never unmaps it, and a fit compiles one per bucket shape. The kernel caps a
+  process at `vm.max_map_count` (65,530 on the HPC), so study 14's hurdle K ≥ 5 runs were killed
+  with `LLVM ERROR: Unable to allocate section memory` (#119). The trainer calls
+  `jax.clear_caches()`, which returns the maps (10,481 → 509 after 399 shapes):
+  - after the global fit;
+  - after every `RELEASE_EVERY` (100) subject refits, between thread-pool chunks;
+  - every 100 subjects of the posterior pass.
+
+  Each release logs the process's map count. The cost is recompiling bucket shapes afterwards,
+  seconds per phase; scores are unchanged.
+- **Artifacts** (`output_dir/glmhmm/`):
+  - `fit.json`: config, summary, global and per-subject parameters, the EM trace, and source SHAs;
+  - `heldout_per_subject.csv`;
+  - `heldout_trials.parquet` (with `save_posteriors`): per-trial predictive probabilities,
+    filtered and smoothed posteriors and Viterbi paths, keyed by (subject_id, ses_idx, trial),
+    with the split and stage.
 
 ---
 
@@ -622,6 +717,80 @@ environment.
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change a feature.
+
+### 2026-10-28
+- **`GLMHMMTrainer`: `subject_prior_center` and `global_fit_dir`.** Refits can centre their
+  weight prior on the global fit (`global`; needs foraging-models >= 0.27.0), and a run can load
+  a saved global fit instead of fitting one, checked against this run's settings and training
+  sessions (`glmhmm/global/train_data_sha256`; older files by training-trial count). See §5
+  "glmhmm specifics".
+- **`GLMHMMTrainer` releases compiled code between phases and refit chunks (#119).** XLA's CPU
+  JIT never unmaps an executable's memory, so long runs hit `vm.max_map_count`; the trainer now
+  calls `jax.clear_caches()` after the global fit, every 100 subject refits and every 100
+  subjects of the posterior pass. See §5 "glmhmm specifics".
+
+### 2026-10-27
+- **`GLMHMMTrainer` (`model.type: glmhmm`): GLM-HMM baseline over left/right/ignore (study 14).**
+  Global fit on the training cohort's train sessions, then per-subject MAP refits scored on eval
+  sessions, through the GRU's metric code. Logs `heldout/eval_likelihood` and `heldout/final/*`
+  (matched), `heldout/zero_shot/*` (zero-shot, the same trials) and `glmhmm/select/*` (the
+  K-selection score from training-cohort refits). See §5 "glmhmm specifics". Needs
+  `aind-dynamic-foraging-models[glmhmm]` (foraging-models #81) and `data.ignore_policy=include`.
+- **Runner: the held-out cohort never inherits training `subject_ids`.** The held-out loader now
+  always sets `subject_ids` (None unless `data.test_subject_ids` picks a subset). Explicit ids
+  bypass `split="heldout"`, so a run that chose its training mice with `data.subject_ids` used
+  to score those same mice under `heldout/*`. This also affected `hb` and `baseline_rl`, which
+  share the helper. `glmhmm` also receives the held-out loader's metadata
+  (`bundle.extras["heldout_metadata"]`) for its train/eval split.
+
+### 2026-10-25
+- **`HBTrainer(estimator="heldout_two_level")`: held-out subjects fitted alone (study 13).** No
+  population level and no training cohort: each held-out subject gets a two-level Hattori2019 model
+  under a fixed hyperprior (`FIXED_HYPERPRIOR` in `aind-dynamic-foraging-models`, the same model as
+  `hattori2019_two_level`). It is conditioned on the subject's train sessions and scored on its eval
+  sessions (`eval_every_n`), the per-mouse MLE baseline's split. Runs `num_chains` chains so each
+  subject is gated on its own (study 08's gates, R-hat < 1.01 and bulk ESS ≥ 400). The k sweep is
+  skipped. Logs:
+  - `heldout/eval_likelihood`: the **session-marginal** likelihood, with `_se`.
+  - `heldout/eval_likelihood_trial_marginal`: the score the other estimators log.
+  - `heldout/eval_log_lik_sum` (with `_se`, `_trial_marginal`) and `heldout/num_eval_trials`:
+    totals that pool exactly across runs fitting subject subsets (`data.test_subject_ids`),
+    errors in quadrature: separate runs share no draws, and each run's random key folds in a
+    hash of its subject set, so subsets draw independent streams under one seed.
+  - `heldout/eval_likelihood_converged_only`, the weight-ESS summary, and the number of sessions
+    failing the Pareto k̂ gate (`heldout/n_sessions_pareto_k_fail`, threshold
+    `heldout/pareto_k_threshold`; an unjudged k̂ counts as failing).
+  - `hb/max_r_hat`, `hb/min_ess_bulk`, `hb/n_subjects_converged`, `hb/divergences`.
+  - Table `heldout/per_subject_two_level`.
+  - **Not** `heldout/test_likelihood`: for the GRU that key is a zero-shot score, and this estimator
+    has none (wrapper#107).
+  New key `session_draws_per_posterior_draw` (default 64) sets the session draws behind each
+  session-marginal. Draws and diagnostics are written to `artifact_dir/<run tag>/` straight after
+  sampling, and per-session scores after scoring. Needs `aind-dynamic-foraging-models` with
+  `fit_heldout_two_level` (foraging-models #79), `batched_heldout_scores` (#78) and its
+  `pareto_k` output with `pareto_k_threshold` (#80).
+
+### 2026-10-14
+- **`HBStanTrainer`: the Stan arm of the HB baseline.** `model: hb_hattori_stan` fits the same
+  three-level Hattori2019 model as `HBTrainer`, with pystan (the Stan program uses `Phi_approx` for the
+  bounded session parameters where NumPyro uses the exact normal CDF, so the posteriors are nearly,
+  not exactly, identical), on the same cohort (same
+  `data.subject_ratio` and `seed`, same cohort arrays via `hb_trainer`'s own helpers). It fits
+  the population only and logs no `heldout/*`, so a Stan run is **not** a rung on the scaling
+  curve. Sampler settings default to the NumPyro ladder's (2000 warmup, 2000 draws, 4 chains).
+  `STAN_NUM_THREADS` is set from the SLURM allocation (`SLURM_CPUS_PER_TASK // num_chains`) unless
+  the environment already sets it; whether more threads speed the fit is not established.
+  Artifacts go to `artifact_dir/<wandb run id>/` (HPC sweeps share one `artifact_dir`, so fixed file names
+  would let a later rung overwrite an earlier one). The raw draws are written straight after sampling, before diagnostics, so a failure there cannot
+  lose an hours-long fit; the Stan program is read before the cohort is built, so a models package
+  without it fails early with a clear message. Needs the new `stan` extra (`pip install -e ".[stan]"`,
+  PyStan 3) and an `aind-dynamic-foraging-models` that ships `hb_three_level.stan`; the models
+  minimum in `pyproject.toml` is not raised yet because no release contains the file.
+  ESS and R-hat are computed with the chain axis taken from PyStan's layout (`chains_first`): an earlier
+  version reshaped it chain-major, mixed the chains and logged ESS about 6x too high.
+  Tests: `tests/test_hb_stan_trainer.py` (thread split, `fit()` against a fake `stan` module for seed wiring,
+  persistence order and early failure, data marshalling for ragged cohorts, and the diagnostics against
+  draws with distinguishable chains; no Stan install needed, the diagnostics tests need arviz).
 
 ### 2026-09-07
 - **Frozen-random GRU reservoir ablation.** Added the opt-in

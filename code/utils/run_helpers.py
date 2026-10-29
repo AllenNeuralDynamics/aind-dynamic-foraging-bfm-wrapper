@@ -264,6 +264,33 @@ def _code_versions() -> dict[str, Optional[str]]:
     }
 
 
+def _launch_meta(config_meta: Optional[dict]) -> dict:
+    """Merge the launcher's ``BFM_META_*`` env into the config's ``meta`` block.
+
+    ``meta`` is our portable, human-readable provenance system (study / variant /
+    launch_id / label / note / config_hash, plus the studies-repo commit that held
+    the sweep), set by the dispatcher launchers via ``BFM_META_*`` env on Beaker and
+    consistent across CO / Beaker / AI1 HPC. A value already in the config (HPC
+    injects ``+meta.*`` Hydra overrides instead of env) is kept when the env is
+    unset; a set env wins. ``note`` is a free-text "why this run exists + what we
+    want to learn" so humans and agents can read intent straight from the run record.
+
+    ``studies_commit`` only arrives from launchers that know a separate studies
+    repository (dispatcher #124); runs without it predate the split, and their sweep
+    lives at ``dispatcher_commit`` in the dispatcher.
+    """
+    meta_env = {
+        "study": get_env("BFM_META_STUDY"),
+        "variant": get_env("BFM_META_VARIANT"),
+        "launch_id": get_env("BFM_META_LAUNCH_ID"),
+        "label": get_env("BFM_META_LABEL"),
+        "note": get_env("BFM_META_NOTE"),
+        "config_hash": get_env("BFM_META_CONFIG_HASH"),
+        "studies_commit": get_env("BFM_META_STUDIES_COMMIT"),
+    }
+    return {**(config_meta or {}), **{k: v for k, v in meta_env.items() if v}}
+
+
 def _init_wandb_with_fallback(init_kwargs: dict) -> wandb.sdk.wandb_run.Run:
     """``wandb.init`` with bounded jittered retries, then an offline fallback.
 
@@ -327,20 +354,9 @@ def start_wandb_run(
     # code/ref bump updates values instead of raising ConfigError). Two layers:
     #  - platform-native cross-ref ids (alongside CO_COMPUTATION_ID): Beaker exp/job +
     #    code SHAs — for jumping to the exact run on each platform.
-    #  - `meta`: our portable, human-readable system (study / variant / launch_id /
-    #    label / note / config_hash), set by launch_beaker_resumable.py via BFM_META_*
-    #    env — consistent across CO / Beaker / AI1 HPC. Merge-safe with any config `meta`.
-    #    `note` is a free-text "why this run exists + what we want to learn" so humans and
-    #    agents can read intent straight from the run record.
-    meta_env = {
-        "study": get_env("BFM_META_STUDY"),
-        "variant": get_env("BFM_META_VARIANT"),
-        "launch_id": get_env("BFM_META_LAUNCH_ID"),
-        "label": get_env("BFM_META_LABEL"),
-        "note": get_env("BFM_META_NOTE"),
-        "config_hash": get_env("BFM_META_CONFIG_HASH"),
-    }
-    meta = {**(run.config.get("meta") or {}), **{k: v for k, v in meta_env.items() if v}}
+    #  - `meta`: the launcher's BFM_META_* env merged over any config `meta`; see
+    #    `_launch_meta`.
+    meta = _launch_meta(run.config.get("meta"))
     provenance = {
         "CO_COMPUTATION_ID": os.environ.get("CO_COMPUTATION_ID"),
         "BEAKER_EXPERIMENT_ID": os.environ.get("BEAKER_EXPERIMENT_ID"),

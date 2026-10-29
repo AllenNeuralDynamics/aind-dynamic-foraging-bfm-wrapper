@@ -1,0 +1,93 @@
+## Beaker smoke test for the GLM-HMM image (beaker/glmhmm/Dockerfile): no W&B, no study.
+##
+## One task per cluster study 14 can use (both reach S3). Each checks:
+##   1. JAX sees the GPU;
+##   2. a float64 linear solve runs on the GPU, the check the CUDA pin exists for;
+##   3. the GLM-HMM unit tests pass (they run on the CPU by design);
+##   4. three EM iterations on the GPU give the same log joint as on the CPU;
+##   5. Hydra composes model=glmhmm across the repos;
+##   6. the GLMHMMTrainer tests pass.
+##
+## Set the image to the name build_and_push.sh pushed, then submit:
+##   beaker experiment create -w ai1/aind-dynamic-foraging-foundation-model beaker/glmhmm/smoke.yaml
+## Watch for "SMOKE OK" in both tasks at https://beaker.org/ex/<experiment-id>.
+
+version: v2
+description: GLM-HMM image smoke (GPU float64 solve, GLM-HMM tests, GPU vs CPU EM, trainer tests)
+tasks:
+  - name: smoke-h200
+    image:
+      beaker: han-hou/dynamic-foraging-bfm-glmhmm-YYYYMMDD   # set to the built image
+    command: &smoke_command
+      - bash
+      - /workspace/aind-dynamic-foraging-bfm-wrapper/beaker/entrypoint.sh
+      - bash
+      - -lc
+      - |
+        set -e
+        python -c "import jax; print('JAX devices:', jax.devices())"
+        pip list 2>/dev/null | grep -E "^(jax|jaxlib|nvidia-(cublas|cusolver|cusparse|nvjitlink)-cu12) "
+        python - <<'PY'
+        import jax, jax.numpy as jnp
+        from jax.experimental import enable_x64
+        with enable_x64():
+            a = jnp.eye(20) * 2.0 + 0.1
+            print("GPU float64 solve OK:", float(jnp.linalg.solve(a, jnp.ones(20)).sum()), a.devices())
+        PY
+        (cd /workspace/aind-dynamic-foraging-models && AIND_GLMHMM_REQUIRE_DEPS=1 \
+          python -m unittest discover -s tests -p "test_glmhmm_*.py")
+        python - <<'PY'
+        import os, numpy as np, jax
+        from aind_dynamic_foraging_models.glm_hmm import GLMHMM, GLOBAL_PRIOR, fit_em, make_buckets
+        rng = np.random.default_rng(0)
+        sessions = []
+        for _ in range(200):
+            c = rng.choice(3, 400, p=[0.47, 0.47, 0.06])
+            sessions.append((c, ((rng.random(400) < 0.4) & (c != 2)).astype(int)))
+        model = GLMHMM(4, 5, "hurdle")
+        params, props = model.initialize(jax.random.PRNGKey(0), noise_scale=0.2)
+        lj = {}
+        for device in ("gpu", "cpu"):
+            os.environ["AIND_GLMHMM_DEVICE"] = device
+            lj[device] = fit_em(model, params, props, make_buckets(sessions, 5), GLOBAL_PRIOR,
+                                max_iters=3, tol=0.0).log_joint
+        print("EM log joint gpu", lj["gpu"][-1], "cpu", lj["cpu"][-1])
+        assert np.allclose(lj["gpu"], lj["cpu"], rtol=0, atol=1e-6), lj
+        PY
+        python -m run_hpc --cfg job data=mice_snapshot_scaling data.ignore_policy=include model=glmhmm > /dev/null
+        echo "Hydra compose model=glmhmm: OK"
+        python -m unittest tests.test_glmhmm_trainer
+        echo "SMOKE OK"
+    context: &smoke_context
+      priority: low
+      preemptible: true
+    constraints:
+      cluster:
+        - ai1/octo-hub-onprem-h200
+    resources: &smoke_resources
+      gpuCount: 1
+    envVars: &smoke_env
+      - name: WRAPPER_REF
+        value: main
+      - name: DISPATCHER_REF
+        value: main
+      - name: FORAGING_MODELS_REF
+        value: main
+      - name: BFM_OUTPUT_DIR
+        value: /results
+      - name: WANDB_MODE
+        value: offline
+    result:
+      path: /results
+  - name: smoke-l40s
+    image:
+      beaker: han-hou/dynamic-foraging-bfm-glmhmm-YYYYMMDD   # set to the built image
+    command: *smoke_command
+    context: *smoke_context
+    constraints:
+      cluster:
+        - ai1/octo-hub-aws-l40s
+    resources: *smoke_resources
+    envVars: *smoke_env
+    result:
+      path: /results

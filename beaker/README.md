@@ -176,6 +176,8 @@ eval-throttling (item 10) were both tested and gave nothing. For *scale*, use
 | File | What it is | Rebuild image to change? |
 |---|---|---|
 | `Dockerfile` | GPU image: clones all three runtime repos + installs deps | **Yes** |
+| `glmhmm/Dockerfile`, `glmhmm/cuda-constraints.txt` | GLM-HMM image: the same, with the models `[glmhmm]` extra and the CUDA solver libraries pinned (GPU linear solves fail without the pin; wrapper #111). Not yet built | **Yes** |
+| `glmhmm/smoke.yaml` | Beaker spec: GLM-HMM image check on `onprem-h200` and `aws-l40s` (GPU float64 solve, GLM-HMM tests, GPU vs CPU EM, trainer tests) | No |
 | `entrypoint.sh` | Runtime bootstrap: pulls latest code, then `exec`s the job | **Yes** (baked, runs before the pull) |
 | `build_and_push.sh` | Builds (`linux/amd64`) and pushes via `beaker image create` | n/a |
 | `BUILD_LOG.md` | Registry metadata and dependency rationale for each image build | n/a |
@@ -223,6 +225,7 @@ beaker image get disrnn-wrapper   # note the ref: han-hou/disrnn-wrapper
 | Flag | Meaning | Default |
 |---|---|---|
 | `--name NAME` | Beaker image name | `disrnn-wrapper` |
+| `--dockerfile PATH` | Dockerfile to build; its directory is the build context. Needs `--name` | `beaker/Dockerfile` |
 | `--workspace WS` | Beaker workspace | `ai1/aind-dynamic-foraging-foundation-model` |
 | `--ref REF` | Branch/tag/SHA baked into all three repos | `main` |
 | `--wrapper-ref` / `--dispatcher-ref` | Override one repo's baked ref | `main` |
@@ -239,6 +242,20 @@ bash beaker/build_and_push.sh --force-rebuild --force-override-beaker
 
 After a successful push, add the Beaker image ID, registry timestamps, exact
 baked refs, and rebuild reason to [`BUILD_LOG.md`](BUILD_LOG.md).
+
+The GLM-HMM image is a second image with its own name, built the same way:
+
+```bash
+bash beaker/build_and_push.sh --dockerfile beaker/glmhmm/Dockerfile \
+  --name dynamic-foraging-bfm-glmhmm-<YYYYMMDD> \
+  --wrapper-ref <wrapper SHA> --dispatcher-ref <dispatcher SHA> \
+  --foraging-models-ref <models SHA>
+beaker experiment create -w ai1/aind-dynamic-foraging-foundation-model beaker/glmhmm/smoke.yaml
+```
+
+Pin each repository to its own SHA. `--ref` sets all three refs to one value, so it suits a
+shared branch name (`--ref main`) but not a commit. Set the image name in `glmhmm/smoke.yaml`
+first, and look for `SMOKE OK` in both of its tasks.
 
 > Apple Silicon builds `linux/amd64` under emulation (Beaker nodes are x86) — slower
 > but correct; the flag is already set. The image name/ref stays stable across

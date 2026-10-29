@@ -28,8 +28,13 @@ saved run dir ──► resolve_model_run(model_dir, split, checkpoint_policy)
                           (generative, likelihood comparison, embedding space, …)
 ```
 
-- **`run_analysis.py`** — the single command-line entry point. One sub-command per
+- **`run_analysis.py`** — the main command-line entry point. One sub-command per
   analysis type; loads everything from the saved run. Start here.
+- **`external_transfer/`** — `python -m external_transfer.gru_transfer`: transfers a
+  pinned trained GRU (W&B training-output artifact, digest-checked) to an external
+  bandit dataset by fine-tuning a new-subject embedding. Inputs: a source manifest
+  (`--source-manifest-json` text or `--source-manifest` file) and the external dataset
+  cache under `--data-root`. Study 09's Beaker runner.
 - **`post_training_analysis/`** — the analysis implementations (importable Python
   API), exposed through a lazy gateway in `post_training_analysis/__init__.py`.
 - **`evaluation/`** — shared *evaluation primitives* used by **both** training-time
@@ -60,6 +65,7 @@ in-repo `data_loaders.disrnn_dataset` builder (vendored from the retired
 | `post_training_analysis/gru_counterfactual.py` | Rebuild a GRU run's network + model-input tensor for a split and run it on edited inputs (`reward_flip_effects`: Δlogit after flipping one trial's reward) |
 | `post_training_analysis/gru_step.py` | `GruStep`: the trained multisubject GRU's update with the context as a free input (`step`, `logit_diff`, `jacobian`, `run`) plus `subject_context` (the network's own embedding + session-delta module), `find_fixed_points` (forward iteration + damped Newton) and `run_ablated` (mean-replacement ablation of a subspace at every step, global or per-input means; full or memory-only; per-input means assume 2-action inputs); parity-tested against Haiku |
 | `post_training_analysis/baseline_rl_trial_rollout.py` | `rollout_baseline_rl`: per-trial P(right) and Q of per-subject baseline-RL fits on any trial table; Q taken from the agent itself (exact; the shared recovery can be wrong for 2-learning-rate agents) |
+| `external_transfer/gru_transfer.py` | Source-GRU → external-dataset transfer cell (study 09); `python -m` entry point |
 | `post_training_analysis/*.ipynb` | Exploratory notebooks (`p_switch_*`, `simulate_sessions`) — see [§8](#8-known-gaps--backlog) |
 | `evaluation/heldout_eval_config.py` | `HeldoutEvalConfig` — config→eval bridge (shared by training & eval) |
 | `evaluation/common.py` | Model-agnostic helpers (logit→prob math, identifier/filename normalization, subject/session grouping, param loading) |
@@ -305,6 +311,12 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change an evaluation feature.
+
+### 2026-10-24
+- **`external_transfer.gru_transfer`** moved here from study 09's `run_gru_transfer.py`
+  (dispatcher #179), so Beaker jobs read no study files: the source manifest arrives on
+  the command line. `hydrate_model_dir(..., version=)` downloads the exact artifact
+  version the runner digest-checked.
 
 ### 2026-10-16
 - **Counterfactual GRU runs and per-trial baseline-RL rollouts.** `gru_counterfactual` and

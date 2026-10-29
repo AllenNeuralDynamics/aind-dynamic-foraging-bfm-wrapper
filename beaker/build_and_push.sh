@@ -9,6 +9,9 @@
 #
 # Options:
 #   --name NAME             Beaker image name (default: dynamic-foraging-bfm-wrapper)
+#   --dockerfile PATH       Dockerfile to build (default: beaker/Dockerfile). Its directory is
+#                           the build context. Requires --name, so a second image never takes
+#                           the default name (GLM-HMM: beaker/glmhmm/Dockerfile).
 #   --description TEXT      Notes recorded on the Beaker image itself (what changed and
 #                           why). Read back with `beaker image get`; keep it in sync with
 #                           the BUILD_LOG.md entry, which is the fuller record.
@@ -31,6 +34,8 @@ set -euo pipefail
 
 # Defaults (override via the flags above — not env vars).
 IMAGE_NAME="dynamic-foraging-bfm-wrapper"
+NAME_SET=0
+DOCKERFILE=""
 DESCRIPTION=""
 WORKSPACE="ai1/aind-dynamic-foraging-foundation-model"
 WRAPPER_REF="main"
@@ -39,11 +44,12 @@ FORAGING_MODELS_REF="main"
 FORCE_REBUILD=0
 FORCE_OVERRIDE_BEAKER=0
 
-usage() { sed -n '7,27p' "$0"; }
+usage() { sed -n '7,30p' "$0"; }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --name)                  IMAGE_NAME="$2"; shift 2 ;;
+        --name)                  IMAGE_NAME="$2"; NAME_SET=1; shift 2 ;;
+        --dockerfile)            DOCKERFILE="$2"; shift 2 ;;
         --description)           DESCRIPTION="$2"; shift 2 ;;
         --workspace)             WORKSPACE="$2"; shift 2 ;;
         --ref)                   WRAPPER_REF="$2"; DISPATCHER_REF="$2"; FORAGING_MODELS_REF="$2"; shift 2 ;;
@@ -58,8 +64,19 @@ while [ "$#" -gt 0 ]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "$DOCKERFILE" ]; then
+    if [ "$NAME_SET" -eq 0 ]; then
+        echo "ERROR: --dockerfile needs --name, so a second image never takes the default name." >&2
+        exit 1
+    fi
+    [ -f "$DOCKERFILE" ] || { echo "ERROR: no Dockerfile at $DOCKERFILE" >&2; exit 1; }
+    DOCKERFILE="$(cd "$(dirname "$DOCKERFILE")" && pwd)/$(basename "$DOCKERFILE")"
+else
+    DOCKERFILE="$SCRIPT_DIR/Dockerfile"
+fi
+BUILD_CONTEXT="$(dirname "$DOCKERFILE")"
 
-echo "image: $IMAGE_NAME   workspace: $WORKSPACE"
+echo "image: $IMAGE_NAME   workspace: $WORKSPACE   dockerfile: $DOCKERFILE"
 echo "refs: dispatcher=${DISPATCHER_REF} wrapper=${WRAPPER_REF} foraging-models=${FORAGING_MODELS_REF}"
 echo "force-rebuild: $FORCE_REBUILD   force-override-beaker: $FORCE_OVERRIDE_BEAKER"
 
@@ -100,9 +117,9 @@ docker build \
     --build-arg WRAPPER_REF="$WRAPPER_REF" \
     --build-arg DISPATCHER_REF="$DISPATCHER_REF" \
     --build-arg FORAGING_MODELS_REF="$FORAGING_MODELS_REF" \
-    -f "$SCRIPT_DIR/Dockerfile" \
+    -f "$DOCKERFILE" \
     -t "$IMAGE_NAME" \
-    "$SCRIPT_DIR"
+    "$BUILD_CONTEXT"
 
 # Replace the old image only now that the new build succeeded.
 if [ "$REPLACE_EXISTING" -eq 1 ]; then

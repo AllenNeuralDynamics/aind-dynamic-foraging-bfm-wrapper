@@ -19,7 +19,8 @@
 # enough — Beaker nodes provide the GPU driver.
 #
 # The models package is installed with its [bayes] extra, which adds numpyro, arviz,
-# xarray and h5netcdf for the hierarchical Bayesian baseline.
+# xarray and h5netcdf for the hierarchical Bayesian baseline. The GLM-HMM has its own image,
+# beaker/glmhmm/Dockerfile, which pins the CUDA solver libraries; this one does not need them.
 #
 # FORAGING_MODELS_REF must point at a ref that HAS that extra. pip does not fail on an
 # unknown extra -- it exits 0 and installs without it -- so building against a ref where
