@@ -20,8 +20,11 @@ try:
     HAS_GLMHMM = True
     # Prior.mean (the global-centred refit prior) arrived in foraging-models 0.27.0.
     HAS_PRIOR_MEAN = "mean" in aind_dynamic_foraging_models.glm_hmm.Prior._fields
+    # Prior.transition_concentration (a centred transition prior) arrived after 0.27.1.
+    HAS_TRANSITION_CONCENTRATION = (
+        "transition_concentration" in aind_dynamic_foraging_models.glm_hmm.Prior._fields)
 except ImportError:  # pragma: no cover - exercised only without the glmhmm extra
-    HAS_GLMHMM = HAS_PRIOR_MEAN = False
+    HAS_GLMHMM = HAS_PRIOR_MEAN = HAS_TRANSITION_CONCENTRATION = False
 
 
 def _make_frame(subjects=("m0", "m1", "m2"), n_sessions=4, n_trials=80, seed=0, stage=True):
@@ -321,6 +324,31 @@ class TestFit(unittest.TestCase):
                             scores["global"]["heldout/eval_likelihood"])
         with self.assertRaises(ValueError):
             self._trainer("unused", subject_prior_center="mean")
+
+    @unittest.skipUnless(HAS_TRANSITION_CONCENTRATION,
+                         "needs aind-dynamic-foraging-models with Prior.transition_concentration")
+    def test_subject_transition_strength(self):
+        """A strong transition prior holds each refit's A at the global fit's; None is today's."""
+        fits, scores = {}, {}
+        for strength in (None, 1e8):
+            with tempfile.TemporaryDirectory() as out:
+                scores[strength] = self._trainer(out, transition_strength_subject=strength,
+                                                 save_posteriors=False).fit(self._bundle())
+                fits[strength] = json.loads((Path(out) / "glmhmm" / "fit.json").read_text())
+        held = fits[1e8]
+        A_global = np.asarray(held["global"]["transition_matrix"])
+        for params in held["subjects"].values():
+            np.testing.assert_allclose(params["transition_matrix"], A_global, atol=1e-4)
+        free = [np.abs(np.asarray(p["transition_matrix"]) - A_global).max()
+                for p in fits[None]["subjects"].values()]
+        self.assertGreater(max(free), 1e-3)   # without the prior, the refits move A
+        self.assertEqual(scores[1e8]["glmhmm/transition_strength_subject"], 1e8)
+        self.assertIsNone(scores[None]["glmhmm/transition_strength_subject"])
+        self.assertEqual(scores[None]["glmhmm/global/log_joint"],
+                         scores[1e8]["glmhmm/global/log_joint"])   # global fit untouched
+        for bad in (-1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                self._trainer("unused", transition_strength_subject=bad)
 
     def test_releasing_compiled_code_does_not_change_the_fit(self):
         """Clearing JAX's caches between every subject (#119) gives the same scores."""

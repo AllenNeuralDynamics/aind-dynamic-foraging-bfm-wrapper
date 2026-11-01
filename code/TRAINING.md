@@ -433,6 +433,15 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
   `global` it is centred on the global fit's weights, so a refit moves only as far from the
   global fit as the subject's data require. `global` needs `aind-dynamic-foraging-models`
   >= 0.27.0 (`Prior.mean`); the trainer refuses it at construction on an older install.
+- **Refit transition prior** (`model.transition_strength_subject`, default `null`). With
+  `null`, the refits' transition matrix has a Dirichlet(`transition_alpha_subject`) prior on each
+  row, plus `stickiness` on the diagonal. At the default `stickiness: 0` it is centred on uniform
+  rows, and α = 2 is one pseudo-transition per cell, so a subject's K × K matrix is nearly free. A number c centres it on the global fit instead: concentration
+  1 + c · A_global, i.e. c pseudo-transitions per row spread like the global row, and the update
+  becomes (counts + c · A_global) / (N + c). It replaces `transition_alpha_subject` and
+  `stickiness` for A, and needs `aind-dynamic-foraging-models` with
+  `Prior.transition_concentration` (AllenNeuralDynamics/aind-dynamic-foraging-models#92); the
+  trainer refuses it at construction on an older install.
 - **Reusing a saved global fit** (`model.global_fit_dir`, default `null`). Loads
   `<global_fit_dir>/<emission>_K<num_states>_L<n_lags>.json`, a copy of an earlier run's
   `fit.json`, instead of fitting the global model again, then runs the refits and scores as
@@ -717,6 +726,11 @@ environment.
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change a feature.
+
+### 2026-11-01
+- **`GLMHMMTrainer`: `transition_strength_subject`.** The per-subject refits' transition prior
+  can be centred on the global fit's transition matrix (Dirichlet concentration
+  1 + c · A_global) instead of on uniform rows. See §5 "glmhmm specifics".
 
 ### 2026-10-28
 - **`GLMHMMTrainer`: `subject_prior_center` and `global_fit_dir`.** Refits can centre their

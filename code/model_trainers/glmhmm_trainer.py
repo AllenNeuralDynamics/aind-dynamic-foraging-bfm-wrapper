@@ -228,6 +228,7 @@ class GLMHMMTrainer(ModelTrainer):
         num_newton_steps: int = 5,
         num_workers: int = 1,
         subject_prior_center: str = "zero",
+        transition_strength_subject: Optional[float] = None,
         global_fit_dir: Optional[str] = None,
         select_on_train_subjects: bool = True,
         save_posteriors: bool = True,
@@ -276,6 +277,13 @@ class GLMHMMTrainer(ModelTrainer):
             Centre of the per-subject refits' Gaussian prior on the GLM weights: zero (Ashwood
             et al.), or the global fit's weights, so a subject with little data stays near the
             shared states instead of near "no history effect".
+        transition_strength_subject : float, optional
+            Centre the per-subject refits' transition prior on the global fit: Dirichlet rows
+            with concentration 1 + c * A_global, i.e. c pseudo-transitions per row spread like
+            the global row, so the MAP update is (counts + c * A_global) / (N + c). Replaces
+            ``transition_alpha_subject`` and ``stickiness`` for A. None (default) keeps the
+            Dirichlet(``transition_alpha_subject`` + ``stickiness`` on the diagonal) prior, which
+            is centred on uniform rows when ``stickiness`` is 0.
         global_fit_dir : str, optional
             Load the global fit from ``<dir>/<emission>_K<num_states>_L<n_lags>.json`` (a copy of
             an earlier run's ``fit.json``) instead of fitting it; its sha256 is recorded. For
@@ -324,6 +332,17 @@ class GLMHMMTrainer(ModelTrainer):
                 raise ImportError("subject_prior_center='global' needs aind-dynamic-foraging-"
                                   "models >= 0.27.0 (Prior.mean)")
         self.subject_prior_center = subject_prior_center
+        if transition_strength_subject is not None:
+            if not (np.isfinite(float(transition_strength_subject))
+                    and float(transition_strength_subject) >= 0):
+                raise ValueError("transition_strength_subject must be finite and >= 0, or None")
+            from aind_dynamic_foraging_models.glm_hmm import Prior
+
+            if "transition_concentration" not in Prior._fields:
+                raise ImportError("transition_strength_subject needs aind-dynamic-foraging-"
+                                  "models with Prior.transition_concentration (#92)")
+        self.transition_strength_subject = (None if transition_strength_subject is None
+                                            else float(transition_strength_subject))
         self.global_fit_dir = None if global_fit_dir is None else Path(global_fit_dir)
         self.select_on_train_subjects = bool(select_on_train_subjects)
         self.save_posteriors = bool(save_posteriors)
@@ -437,6 +456,10 @@ class GLMHMMTrainer(ModelTrainer):
         prior = Prior(self.prior_sigma_subject, self.transition_alpha_subject, self.stickiness)
         if self.subject_prior_center == "global":   # Prior.mean needs foraging-models >= 0.27.0
             prior = prior._replace(mean=global_params.emissions)
+        if self.transition_strength_subject is not None:
+            A = np.asarray(global_params.transitions.transition_matrix, np.float64)
+            prior = prior._replace(
+                transition_concentration=1.0 + self.transition_strength_subject * A)
         _, props = model.initialize()
         subjects = []
         for subject in by_subject_train:
@@ -547,6 +570,7 @@ class GLMHMMTrainer(ModelTrainer):
             "glmhmm/global/num_train_trials": int(sum(len(r["choices"]) for r in train_records)),
             "glmhmm/global/fit_seconds": float(global_seconds),
             "glmhmm/subject_prior_center": self.subject_prior_center,
+            "glmhmm/transition_strength_subject": self.transition_strength_subject,
             **(loaded or {}),
             # Only a fresh fit, or a loaded one whose digest matched, vouches for its training
             # sessions; a count-checked legacy file passes on no digest it never had.
@@ -677,7 +701,8 @@ class GLMHMMTrainer(ModelTrainer):
                 "num_states", "emission", "design", "n_lags", "prior_sigma_global",
                 "transition_alpha_global", "prior_sigma_subject", "transition_alpha_subject",
                 "stickiness", "num_restarts", "init_noise", "em_tol", "max_em_iters",
-                "bucket_size", "num_newton_steps", "num_workers", "subject_prior_center", "seed",
+                "bucket_size", "num_newton_steps", "num_workers", "subject_prior_center",
+                "transition_strength_subject", "seed",
             )
         }
 
