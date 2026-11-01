@@ -282,7 +282,8 @@ class GLMHMMTrainer(ModelTrainer):
             with concentration 1 + c * A_global, i.e. c pseudo-transitions per row spread like
             the global row, so the MAP update is (counts + c * A_global) / (N + c). Replaces
             ``transition_alpha_subject`` and ``stickiness`` for A. None (default) keeps the
-            Dirichlet(``transition_alpha_subject``) prior, which is centred on uniform rows.
+            Dirichlet(``transition_alpha_subject`` + ``stickiness`` on the diagonal) prior, which
+            is centred on uniform rows when ``stickiness`` is 0.
         global_fit_dir : str, optional
             Load the global fit from ``<dir>/<emission>_K<num_states>_L<n_lags>.json`` (a copy of
             an earlier run's ``fit.json``) instead of fitting it; its sha256 is recorded. For

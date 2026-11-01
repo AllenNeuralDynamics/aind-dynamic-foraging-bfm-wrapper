@@ -435,8 +435,8 @@ An input-driven HMM with GLM emissions over {left, right, ignore}. The model is
   >= 0.27.0 (`Prior.mean`); the trainer refuses it at construction on an older install.
 - **Refit transition prior** (`model.transition_strength_subject`, default `null`). With
   `null`, the refits' transition matrix has a Dirichlet(`transition_alpha_subject`) prior on each
-  row, centred on uniform rows; at α = 2 that is one pseudo-transition per cell, so a subject's
-  K × K matrix is nearly free. A number c centres it on the global fit instead: concentration
+  row, plus `stickiness` on the diagonal. At the default `stickiness: 0` it is centred on uniform
+  rows, and α = 2 is one pseudo-transition per cell, so a subject's K × K matrix is nearly free. A number c centres it on the global fit instead: concentration
   1 + c · A_global, i.e. c pseudo-transitions per row spread like the global row, and the update
   becomes (counts + c · A_global) / (N + c). It replaces `transition_alpha_subject` and
   `stickiness` for A, and needs `aind-dynamic-foraging-models` with
