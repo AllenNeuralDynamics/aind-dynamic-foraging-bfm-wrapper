@@ -494,13 +494,25 @@ def _resolve_likelihood_run(
     )
 
 
-def _load_training_bundle_for_run(run: ResolvedLikelihoodRun) -> tuple[Any, Any]:
+def _load_training_bundle_for_run(
+    run: ResolvedLikelihoodRun,
+    *,
+    cols_to_retain: Sequence[str] | None = None,
+) -> tuple[Any, Any]:
+    """Rebuild the run's training data bundle from its saved config.
+
+    ``cols_to_retain`` overrides which raw trial columns the loader keeps (e.g. to carry
+    reward probabilities for analysis). It only affects ``bundle.raw``; model inputs are
+    built from ``data.features`` and are unchanged.
+    """
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
     from models.session_conditioning import resolve_session_conditioning_from_architecture
     from utils.multisubject import prepend_session_index_to_multisubject_split_datasets
 
     hydra_config = OmegaConf.load(run.inputs_path)
+    if cols_to_retain is not None:
+        hydra_config.data.cols_to_retain = list(cols_to_retain)
     dataset_loader = instantiate(hydra_config.data)
     dataset_bundle = dataset_loader.load()
     if run.model_type in {"gru", "disrnn"} and bool(run.multisubject):
@@ -981,20 +993,18 @@ def _evaluate_disrnn_dataset(
     return output_df, n_action_logits
 
 
-def _evaluate_gru_dataset(
+def _build_gru_network(
     run: ResolvedLikelihoodRun,
     *,
-    dataset: Any,
-    raw_df: Any,
     metadata: Mapping[str, Any],
-) -> tuple[Any, int]:
-    import numpy as np
-    from disentangled_rnns.library import rnn_utils
+) -> tuple[Any, Any, str]:
+    """The run's GRU network factory, its saved params and the data ignore_policy.
 
+    Shared by ``_evaluate_gru_dataset`` and analyses that run the network on edited inputs.
+    """
     from models.gru_network import make_gru_network
     from models.session_conditioning import resolve_session_conditioning_from_architecture
     from utils.disrnn_evaluation import _load_saved_params
-    from utils.gru_evaluation import add_gru_model_results, _require_n_action_logits
 
     if run.params_path is None:
         raise ValueError("GRU evaluation requires params_path to be resolved.")
@@ -1078,8 +1088,24 @@ def _evaluate_gru_dataset(
         ),
     )
 
-    xs = dataset.get_all()["xs"]
     params = _load_saved_params(Path(run.params_path))
+    return make_network, params, ignore_policy
+
+
+def _evaluate_gru_dataset(
+    run: ResolvedLikelihoodRun,
+    *,
+    dataset: Any,
+    raw_df: Any,
+    metadata: Mapping[str, Any],
+) -> tuple[Any, int]:
+    import numpy as np
+    from disentangled_rnns.library import rnn_utils
+
+    from utils.gru_evaluation import add_gru_model_results, _require_n_action_logits
+
+    make_network, params, ignore_policy = _build_gru_network(run, metadata=metadata)
+    xs = dataset.get_all()["xs"]
     yhat, network_states = rnn_utils.eval_network(make_network, params, xs)
     n_action_logits = _require_n_action_logits(
         dataset,

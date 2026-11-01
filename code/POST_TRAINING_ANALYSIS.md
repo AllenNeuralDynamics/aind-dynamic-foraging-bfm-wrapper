@@ -61,6 +61,10 @@ in-repo `data_loaders.disrnn_dataset` builder (vendored from the retired
 | `post_training_analysis/embedding_space_analysis.py` | Subject-embedding-space visualization (multisubject runs) |
 | `post_training_analysis/baseline_rl_analysis.py` | Baseline-RL analysis from fitted per-session parameters |
 | `post_training_analysis/heldout_finetuning.py` | Held-out subject embedding fine-tuning (**training-adjacent**, [§7](#7-training-adjacent-exceptions)) |
+| `post_training_analysis/gru_trial_states.py` | `extract_gru_trial_states`: one forward pass of a saved 2-action GRU over a training-bundle split → flat per-trial table (hidden states, logits, task-state columns) in the `state-space-*` schema, with likelihood and readout-alignment checks |
+| `post_training_analysis/gru_counterfactual.py` | Rebuild a GRU run's network + model-input tensor for a split and run it on edited inputs (`reward_flip_effects`: Δlogit after flipping one trial's reward) |
+| `post_training_analysis/gru_step.py` | `GruStep`: the trained multisubject GRU's update with the context as a free input (`step`, `logit_diff`, `jacobian`, `run`) plus `subject_context` (the network's own embedding + session-delta module), `find_fixed_points` (forward iteration + damped Newton) and `run_ablated` (mean-replacement ablation of a subspace at every step, global or per-input means; full or memory-only; per-input means assume 2-action inputs); parity-tested against Haiku |
+| `post_training_analysis/baseline_rl_trial_rollout.py` | `rollout_baseline_rl`: per-trial P(right) and Q of per-subject baseline-RL fits on any trial table; Q taken from the agent itself (exact; the shared recovery can be wrong for 2-learning-rate agents) |
 | `external_transfer/gru_transfer.py` | Source-GRU → external-dataset transfer cell (study 09); `python -m` entry point |
 | `post_training_analysis/*.ipynb` | Exploratory notebooks (`p_switch_*`, `simulate_sessions`) — see [§8](#8-known-gaps--backlog) |
 | `evaluation/heldout_eval_config.py` | `HeldoutEvalConfig` — config→eval bridge (shared by training & eval) |
@@ -313,6 +317,21 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
   (dispatcher #179), so Beaker jobs read no study files: the source manifest arrives on
   the command line. `hydrate_model_dir(..., version=)` downloads the exact artifact
   version the runner digest-checked.
+
+### 2026-10-16
+- **Counterfactual GRU runs and per-trial baseline-RL rollouts.** `gru_counterfactual` and
+  `baseline_rl_trial_rollout` (above). `likelihood_comparison._build_gru_network` is split
+  out of `_evaluate_gru_dataset` so both use one network construction.
+- **Free-context step.** `gru_step` (above) for flow fields, fixed points and Jacobians.
+- **Known issue (not changed):** `likelihood_advantage_analysis`'s manual ForagerQLearning Q
+  fallback assumes one learning rate; for Hattori L2F1 fits its reproduction check can pass
+  with wrong Q values. `baseline_rl_trial_rollout` avoids that path.
+- **Per-trial GRU state table.** `gru_trial_states.extract_gru_trial_states` returns every
+  choice trial of a split with `rnn_state_*`, logits/probabilities and optional raw task
+  columns (reward probabilities, bait state), aligned so row *t*'s state produced row *t*'s
+  prediction; it verifies that by reconstructing each logit from the readout.
+  `likelihood_comparison._load_training_bundle_for_run` gains an optional
+  `cols_to_retain` override for those raw columns (model inputs unchanged).
 
 ### 2026-09-04
 - **External target-transfer evaluation.** Held-out embedding fine-tuning accepts
