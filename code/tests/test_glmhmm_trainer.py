@@ -346,8 +346,9 @@ class TestFit(unittest.TestCase):
         self.assertIsNone(scores[None]["glmhmm/transition_strength_subject"])
         self.assertEqual(scores[None]["glmhmm/global/log_joint"],
                          scores[1e8]["glmhmm/global/log_joint"])   # global fit untouched
-        with self.assertRaises(ValueError):
-            self._trainer("unused", transition_strength_subject=-1.0)
+        for bad in (-1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                self._trainer("unused", transition_strength_subject=bad)
 
     def test_releasing_compiled_code_does_not_change_the_fit(self):
         """Clearing JAX's caches between every subject (#119) gives the same scores."""

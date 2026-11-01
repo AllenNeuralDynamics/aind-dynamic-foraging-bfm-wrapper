@@ -332,8 +332,9 @@ class GLMHMMTrainer(ModelTrainer):
                                   "models >= 0.27.0 (Prior.mean)")
         self.subject_prior_center = subject_prior_center
         if transition_strength_subject is not None:
-            if float(transition_strength_subject) < 0:
-                raise ValueError("transition_strength_subject must be >= 0 or None")
+            if not (np.isfinite(float(transition_strength_subject))
+                    and float(transition_strength_subject) >= 0):
+                raise ValueError("transition_strength_subject must be finite and >= 0, or None")
             from aind_dynamic_foraging_models.glm_hmm import Prior
 
             if "transition_concentration" not in Prior._fields:
