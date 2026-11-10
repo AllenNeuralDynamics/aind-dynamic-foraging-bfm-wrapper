@@ -23,6 +23,9 @@ set -euo pipefail
 WRAPPER_REF="${WRAPPER_REF:-main}"
 DISPATCHER_REF="${DISPATCHER_REF:-main}"
 FORAGING_MODELS_REF="${FORAGING_MODELS_REF:-main}"
+# Where the image put the three repos: /workspace on Beaker, /opt/bfm on Cedar
+# (cedar/Dockerfile sets it), because Cedar mounts team storage over /workspace.
+BFM_ROOT="${BFM_ROOT:-/workspace}"
 
 refresh() {  # <repo dir> <ref> <commit env var>
     local dir="$1" ref="$2" commit_env="$3" commit
@@ -37,15 +40,15 @@ refresh() {  # <repo dir> <ref> <commit env var>
 }
 
 echo "[entrypoint] refreshing source from GitHub before the run..."
-refresh /workspace/aind-dynamic-foraging-bfm-dispatcher          "$DISPATCHER_REF"       DISPATCHER_COMMIT
-refresh /workspace/aind-dynamic-foraging-models    "$FORAGING_MODELS_REF"  FORAGING_MODELS_COMMIT
-refresh /workspace/aind-dynamic-foraging-bfm-wrapper             "$WRAPPER_REF"          WRAPPER_COMMIT
+refresh "$BFM_ROOT/aind-dynamic-foraging-bfm-dispatcher"          "$DISPATCHER_REF"       DISPATCHER_COMMIT
+refresh "$BFM_ROOT/aind-dynamic-foraging-models"    "$FORAGING_MODELS_REF"  FORAGING_MODELS_COMMIT
+refresh "$BFM_ROOT/aind-dynamic-foraging-bfm-wrapper"             "$WRAPPER_REF"          WRAPPER_COMMIT
 
 if [ "$#" -eq 0 ]; then
     echo "[entrypoint] no command given; nothing to run." >&2
     exit 1
 fi
 
-cd /workspace/aind-dynamic-foraging-bfm-wrapper/code
+cd "$BFM_ROOT/aind-dynamic-foraging-bfm-wrapper/code"
 echo "[entrypoint] launching: $*"
 exec "$@"
