@@ -21,9 +21,8 @@ bash cedar/build_and_push.sh --wrapper-ref <sha>  # a specific wrapper commit
 ```
 
 The script resolves each ref to a full SHA, pulls `cedar-session` for `linux/amd64`, builds,
-and pushes `dfbfm-wrapper:<YYYYMMDD>-w<wrapper sha7>` to the workspace
-`neural-dynamics-playground`. It stops if that tag already exists, so a tag always names one
-image. `--help` lists the options. Add a line to `../beaker/BUILD_LOG.md` for each push.
+and pushes `dfbfm-wrapper:<YYYYMMDD>-w<wrapper sha7>` to the workspace `dfbfm`. It stops
+if that tag already exists, so a tag always names one image. `--help` lists the options. Add a line to `../beaker/BUILD_LOG.md` for each push.
 
 ## Smoke test
 

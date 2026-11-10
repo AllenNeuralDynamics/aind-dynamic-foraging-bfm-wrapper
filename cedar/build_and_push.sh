@@ -12,7 +12,7 @@
 #   --name NAME             Cedar image name (default: dfbfm-wrapper)
 #   --tag TAG               Image tag (default: <YYYYMMDD>-w<wrapper sha7>). Tags are
 #                           immutable here: the script stops if the tag already exists.
-#   --workspace WS          Cedar workspace (default: neural-dynamics-playground)
+#   --workspace WS          Cedar workspace (default: dfbfm)
 #   --base-tag TAG          cedar-session tag to build on (default: latest)
 #   --ref REF               Branch/tag/SHA to bake into all repos (default: main)
 #   --wrapper-ref REF       Override the wrapper repo ref only
@@ -30,7 +30,7 @@ set -euo pipefail
 
 IMAGE_NAME="dfbfm-wrapper"
 TAG=""
-WORKSPACE="neural-dynamics-playground"
+WORKSPACE="dfbfm"
 BASE_TAG="latest"
 WRAPPER_REF="main"
 DISPATCHER_REF="main"
