@@ -67,8 +67,12 @@ export CEDAR_NO_UPDATE_CHECK=1
 resolve() {  # <repo> <ref>
     local repo="$1" ref="$2" sha
     if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then echo "$ref"; return; fi
+    # Prefer a branch; for an annotated tag take the peeled `^{}` line (the commit), not the
+    # tag object, which ls-remote lists first.
     sha="$(git ls-remote "$GH_ORG/$repo.git" "refs/heads/$ref" "refs/tags/$ref^{}" "refs/tags/$ref" \
-           | head -1 | cut -f1)"
+           | awk -v h="refs/heads/$ref" -v p="refs/tags/$ref^{}" -v t="refs/tags/$ref" \
+                 '$2==h {b=$1} $2==p {pe=$1} $2==t {tg=$1}
+                  END {print (b != "" ? b : (pe != "" ? pe : tg))}')"
     if [ -z "$sha" ]; then
         echo "ERROR: $repo has no branch or tag '$ref' (pass a full 40-character SHA instead)" >&2
         exit 1
