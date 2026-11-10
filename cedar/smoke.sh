@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-test a Cedar image in a running session: the same checks as beaker/smoke.yaml
 # (GPU + bayes imports + Hydra + first training steps, no W&B), plus a database read.
+# It fails on a session without a GPU: jax.devices("gpu") raises when JAX finds none.
 #
 # Run it in a session started from the image, e.g. from your computer:
 #   ssh cedar-<workspace>-<session> 'bash /opt/bfm/aind-dynamic-foraging-bfm-wrapper/cedar/smoke.sh'
@@ -19,11 +20,12 @@ export WANDB_MODE=disabled
 
 exec bash "$BFM_ROOT/aind-dynamic-foraging-bfm-wrapper/beaker/entrypoint.sh" bash -c '
 set -e
-python -c "import jax; print(\"JAX devices:\", jax.devices())"
+python -c "import jax; print(\"JAX GPU devices:\", jax.devices(\"gpu\"))"
 python -c "import aind_dynamic_foraging_models as m; print(\"foraging models:\", m.__version__)"
 python -c "import numpyro, arviz; print(\"bayes extra: numpyro\", numpyro.__version__, \"arviz\", arviz.__version__)"
 python -c "from aind_dynamic_foraging_models import hierarchical_bayes; print(\"hierarchical_bayes import: OK\")"
-python -m run_hpc --cfg job data=synthetic model=disrnn > /dev/null && echo "hydra compose: OK"
+python -m run_hpc --cfg job data=synthetic model=disrnn > /dev/null
+echo "hydra compose: OK"
 python -m run_hpc data=synthetic_hierarchical model=disrnn \
   data.num_subjects=4 \
   data.num_sessions_per_subject=4 \

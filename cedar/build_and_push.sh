@@ -87,9 +87,22 @@ echo "foraging-models=$FORAGING_MODELS_SHA ($FORAGING_MODELS_REF)"
 
 # Pre-flight: signed in, and the tag is new (a pushed tag is what a run records).
 "$CEDAR" auth whoami >/dev/null
+# Returns 0 if the tag exists and 1 if Cedar confirms it does not (no matching version, or no
+# image of that name yet: NotFound, exit 3). Any other lookup failure stops the script, so a
+# timeout can never pass for "the tag is new".
 tag_exists() {
-    "$CEDAR" image show "$IMAGE_NAME" --workspace-name "$WORKSPACE" --query "$TAG" --format json 2>/dev/null \
-        | grep -q "\"$TAG\""
+    local out rc=0
+    out="$("$CEDAR" image show "$IMAGE_NAME" --workspace-name "$WORKSPACE" --query "$TAG" \
+           --format json 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        grep -q "\"$TAG\"" <<<"$out"
+        return
+    fi
+    if [ "$rc" -eq 3 ] && grep -q NotFound <<<"$out"; then
+        return 1
+    fi
+    echo "ERROR: could not check $IMAGE_NAME:$TAG in $WORKSPACE (exit $rc): $out" >&2
+    exit 1
 }
 if tag_exists; then
     echo "ERROR: $IMAGE_NAME:$TAG already exists in $WORKSPACE; choose another --tag" >&2
