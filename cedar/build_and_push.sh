@@ -87,8 +87,11 @@ echo "foraging-models=$FORAGING_MODELS_SHA ($FORAGING_MODELS_REF)"
 
 # Pre-flight: signed in, and the tag is new (a pushed tag is what a run records).
 "$CEDAR" auth whoami >/dev/null
-if "$CEDAR" image show "$IMAGE_NAME" --workspace-name "$WORKSPACE" --query "$TAG" --format json 2>/dev/null \
-        | grep -q "\"$TAG\""; then
+tag_exists() {
+    "$CEDAR" image show "$IMAGE_NAME" --workspace-name "$WORKSPACE" --query "$TAG" --format json 2>/dev/null \
+        | grep -q "\"$TAG\""
+}
+if tag_exists; then
     echo "ERROR: $IMAGE_NAME:$TAG already exists in $WORKSPACE; choose another --tag" >&2
     exit 1
 fi
@@ -109,7 +112,7 @@ cachebust="$(date +%s)"
 docker build \
     --platform linux/amd64 \
     --build-arg CACHEBUST="$cachebust" \
-    --build-arg CEDAR_BASE="cedar-session:$BASE_TAG ${BASE_DIGEST##*@}" \
+    --build-arg CEDAR_BASE="cedar-session:$BASE_TAG@${BASE_DIGEST##*@}" \
     --build-arg WRAPPER_REF="$WRAPPER_SHA" \
     --build-arg DISPATCHER_REF="$DISPATCHER_SHA" \
     --build-arg FORAGING_MODELS_REF="$FORAGING_MODELS_SHA" \
@@ -121,12 +124,18 @@ latest_arg=()
 [ "$PUSH_LATEST" -eq 0 ] || latest_arg=(--latest)
 # The ${a[@]+...} form keeps an empty array legal under `set -u` in macOS's bash 3.2.
 "$CEDAR" image push "$LOCAL_IMAGE" "$IMAGE_NAME:$TAG" --workspace-name "$WORKSPACE" ${latest_arg[@]+"${latest_arg[@]}"}
+if ! tag_exists; then
+    echo "ERROR: the push finished but Cedar does not list $IMAGE_NAME:$TAG" >&2
+    exit 1
+fi
 "$CEDAR" image show "$IMAGE_NAME" --workspace-name "$WORKSPACE" --query "$TAG"
 
 cat <<MSG
 
 Done: $IMAGE_NAME:$TAG in workspace $WORKSPACE.
-Try it on one A100 before sharing it (pick a free GPU cluster: cedar cluster list):
+Try it on one A100 before sharing it (pick a free GPU cluster: cedar cluster list).
+Add --all-ssh-keys to session create so every computer whose key you saved in Cedar
+(cedar ssh-key list) can reach the session, not only this one:
 
   cedar session create ${IMAGE_NAME}-smoke --workspace-name $WORKSPACE \\
     --cluster-name octo.hub-usc1-gcp-a100 --gpu 1 --cpu 8 --ram 64Gi \\
