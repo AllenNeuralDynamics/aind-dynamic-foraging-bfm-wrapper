@@ -131,8 +131,9 @@ Rules:
   `aind-dynamic-foraging-bfm-dispatcher/aind-behavior-foundation-model-skills/`. It is the
   canonical home for cross-cutting operational knowledge — Beaker/HPC launching,
   study conventions, post-hoc reporting, and this repo's runtime distilled in the
-  `wrapper-runtime` skill. It is auto-enabled here via the checked-in
-  `.claude/settings.json` (Claude Code plugin marketplace).
+  `wrapper-runtime` skill. Install it once at user level (see the
+  dispatcher's `aind-behavior-foundation-model-skills/README.md`, "Import"); this repo's
+  `.claude/settings.json` only declares the marketplace, with auto-update on.
 - This repo's **living documents stay canonical** for code-coupled reference:
   `code/TRAINING.md` (read §1.5 "Run lifecycle & key switches" first) and
   `code/POST_TRAINING_ANALYSIS.md`. When you add or change a feature, update the
