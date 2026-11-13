@@ -4,10 +4,8 @@
       "source": {
         "source": "github",
         "repo": "AllenNeuralDynamics/aind-dynamic-foraging-bfm-dispatcher"
-      }
+      },
+      "autoUpdate": true
     }
-  },
-  "enabledPlugins": {
-    "aind-behavior-foundation-model-skills@aind-behavior-foundation-model": true
   }
 }
