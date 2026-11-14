@@ -151,6 +151,11 @@ def resolve_model_run(
 
     baseline_output_path = None
     if model_type == "baseline_rl":
+        if _explicit_checkpoint_step(normalized_policy) is not None:
+            raise ValueError(
+                f"checkpoint_policy={checkpoint_policy!r}: baseline RL runs have no "
+                "checkpoint steps."
+            )
         baseline_output_path = outputs_dir / "baseline_rl_output.json"
         if not baseline_output_path.exists():
             raise FileNotFoundError(
@@ -4777,6 +4782,8 @@ def _normalize_split(split: str) -> str:
 
 def _normalize_checkpoint_policy(checkpoint_policy: str) -> str:
     normalized = str(checkpoint_policy).strip().lower()
+    if _explicit_checkpoint_step(normalized) is not None:
+        return normalized
     if normalized not in {
         _CHECKPOINT_POLICY_BEST_EVAL,
         _CHECKPOINT_POLICY_BEST_HELDOUT,
@@ -4784,9 +4791,17 @@ def _normalize_checkpoint_policy(checkpoint_policy: str) -> str:
     }:
         raise ValueError(
             f"Unsupported checkpoint_policy={checkpoint_policy!r}. "
-            "Use 'best_eval', 'best_heldout', or 'final'."
+            "Use 'best_eval', 'best_heldout', 'final', or 'step_<N>'."
         )
     return normalized
+
+
+def _explicit_checkpoint_step(checkpoint_policy: str) -> int | None:
+    """Return N for an explicit ``step_<N>`` policy, else None."""
+    prefix = "step_"
+    if checkpoint_policy.startswith(prefix) and checkpoint_policy[len(prefix):].isdigit():
+        return int(checkpoint_policy[len(prefix):])
+    return None
 
 
 def _resolve_split_selection(
@@ -4830,6 +4845,35 @@ def _resolve_checkpoint_artifact(
             final_step,
             "final",
             "Selected top-level final params.json.",
+            None,
+        )
+
+    explicit_step = _explicit_checkpoint_step(checkpoint_policy)
+    if explicit_step is not None:
+        # An explicit step must exist: never fall back to another checkpoint.
+        records = [
+            item
+            for item in list(_as_dict(checkpoint_index).get("checkpoints", []) or [])
+            if _coerce_optional_int(item.get("step")) == explicit_step
+        ]
+        candidate = _resolve_artifact_path(
+            model_dir=model_dir,
+            outputs_dir=outputs_dir,
+            # A record without a params_path must not resolve to the final params.json.
+            reported_path=(
+                (records[0].get("params_path") if records else None)
+                or f"outputs/checkpoints/step_{explicit_step}/params.json"
+            ),
+        )
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"checkpoint_policy={checkpoint_policy!r}: no params at {candidate}."
+            )
+        return (
+            candidate,
+            explicit_step,
+            f"step_{explicit_step}",
+            "Selected the explicitly requested checkpoint step.",
             None,
         )
 

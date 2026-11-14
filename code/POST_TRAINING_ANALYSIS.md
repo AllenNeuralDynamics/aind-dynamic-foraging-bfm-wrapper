@@ -66,6 +66,7 @@ in-repo `data_loaders.disrnn_dataset` builder (vendored from the retired
 | `post_training_analysis/gru_step.py` | `GruStep`: the trained multisubject GRU's update with the context as a free input (`step`, `logit_diff`, `jacobian`, `run`) plus `subject_context` (the network's own embedding + session-delta module), `find_fixed_points` (forward iteration + damped Newton) and `run_ablated` (mean-replacement ablation of a subspace at every step, global or per-input means; full or memory-only; per-input means assume 2-action inputs); parity-tested against Haiku |
 | `post_training_analysis/baseline_rl_trial_rollout.py` | `rollout_baseline_rl`: per-trial P(right) and Q of per-subject baseline-RL fits on any trial table; Q taken from the agent itself (exact; the shared recovery can be wrong for 2-learning-rate agents) |
 | `external_transfer/gru_transfer.py` | Source-GRU → external-dataset transfer cell (study 09); `python -m` entry point |
+| `post_training_analysis/heldout_rescore.py` | Re-score a finished GRU's held-out mice with an explicit `fit`/`score` session table and a swap (pass A/B); per-trial p(left/right/ignore), per-session/per-mouse log-likelihoods, per-mouse embedding, manifest; `python -m` entry point (**training-adjacent**, [§7](#7-training-adjacent-exceptions)) |
 | `post_training_analysis/*.ipynb` | Exploratory notebooks (`p_switch_*`, `simulate_sessions`) — see [§8](#8-known-gaps--backlog) |
 | `evaluation/heldout_eval_config.py` | `HeldoutEvalConfig` — config→eval bridge (shared by training & eval) |
 | `evaluation/common.py` | Model-agnostic helpers (logit→prob math, identifier/filename normalization, subject/session grouping, param loading) |
@@ -96,7 +97,7 @@ Every model-dir-based analysis loads a run via
 ```
 
 - **`split`** — `train` | `eval` | `combined` | `heldout` (which sessions to score/rollout).
-- **`checkpoint_policy`** — `best_eval` | `best_heldout` | `final` (which checkpoint to load).
+- **`checkpoint_policy`** — `best_eval` | `best_heldout` | `final` | `step_<N>` (which checkpoint to load; `step_<N>` fails if that step is missing).
 - Returns a `ResolvedModelRun` carrying `params_path`, `config_path`, `model_type`,
   `multisubject`, `ignore_policy`, resolved subject/session IDs, etc.
 
@@ -240,7 +241,27 @@ explicitly:
    `DisrnnTrainer`/`GruTrainer` and the training utilities. It also accepts a
    canonical external target through `target_data` or `target_bundle`, freezes
    the recurrent core, and uses a fixed-final-step policy so target-test data do
-   not select adaptation hyperparameters or checkpoints.
+   not select adaptation hyperparameters or checkpoints. Opt-in
+   `heldout_finetuning.export_trial_predictions: true` (GRU) writes
+   `outputs/trial_predictions.csv.gz` (p_left, p_right, p_ignore for every held-out trial,
+   `split` = train/eval) and checks that its eval rows reproduce the final eval likelihood.
+   Its CLI wrapper **`heldout_rescore`** (study 17, wrapper #126) imports it lazily the
+   same way. It takes a finished run (`--run-id` or `--model-dir`), a mouse list and a
+   `subject_id, session_id, role` table (`fit`/`score`); pass A tunes the embedding on `fit`
+   and scores `score`, `--swap` (pass B) inverts. The table replaces the `eval_every_n`
+   alternation through `_build_multisubject_bundle(session_split_by_subject=...)`; sessions
+   only the loader has, or only the table has, are listed in `manifest.json` and are neither
+   tuned nor scored. Loader sessions without a role stay in the packed sequence
+   (`allow_unassigned_sessions`), so every session keeps its training-time session index.
+   Requested mice that the source run trained on are refused.
+   Fine-tune settings default to the source run's `auto_heldout_finetune` (as
+   `resume_heldout_beaker.py`). All held-out mice are tuned in one joint optimisation, as in
+   the auto path. `--session-lambda {checkpoint,1}` (default `checkpoint`) sets the
+   session_curriculum_lambda of BOTH the fine-tune and the scoring forward pass: the selected
+   checkpoint's own lambda (from `checkpoints/index.json` / `output_summary.json`), or 1 as in
+   the auto held-out fine-tune (`heldout_finetuning.session_curriculum_lambda`, default 1.0,
+   so studies 01/02 reproduce). The manifest and the per-trial table record the checkpoint's
+   lambda and the lambda used. W&B logging (optional) creates a new run.
 2. **`likelihood_comparison._evaluate_disrnn_dataset`** — for the **multisubject
    disRNN** case only, it borrows the trainer's network-construction helpers
    (single-subject eval uses `evaluation.disrnn_evaluation`'s own builder).
@@ -311,6 +332,14 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change an evaluation feature.
+
+### 2026-11-13
+- **`post_training_analysis.heldout_rescore`** (wrapper #126): held-out re-scoring with an
+  explicit fit/score session table and a swap, a 3-way per-trial export, per-mouse
+  embeddings and a manifest ([§7](#7-training-adjacent-exceptions)). `resolve_model_run`
+  accepts `checkpoint_policy="step_<N>"`. Opt-in `heldout_finetuning.session_curriculum_lambda`
+  (default 1.0) sets the GRU's session lambda for the fine-tune and its scoring. The default
+  held-out fine-tune is unchanged.
 
 ### 2026-10-24
 - **`external_transfer.gru_transfer`** moved here from study 09's `run_gru_transfer.py`

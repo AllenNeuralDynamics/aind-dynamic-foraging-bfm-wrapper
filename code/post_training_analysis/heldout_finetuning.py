@@ -32,6 +32,7 @@ from disentangled_rnns.library import rnn_utils
 from evaluation.target_transfer import (
     build_binary_trial_predictions,
     summarize_binary_trial_predictions,
+    target_test_mask,
 )
 from model_trainers.disrnn_trainer import DisrnnTrainer
 from model_trainers.gru_trainer import GruTrainer, _threeway_likelihood_decomposition
@@ -400,6 +401,13 @@ def _resolve_runtime_config(
         "skip_subjects_with_insufficient_sessions": bool(
             fine_tune_cfg.get("skip_subjects_with_insufficient_sessions", True)
         ),
+        # Opt-in per-trial export (GRU): p(left), p(right), p(ignore) for every
+        # held-out trial, fine-tuned and scored sessions alike. Off by default.
+        "export_trial_predictions": bool(fine_tune_cfg.get("export_trial_predictions", False)),
+        # Session-conditioning gate used in BOTH the fine-tune and the scoring forward pass
+        # (GRU). 1.0 is the long-standing default (studies 01/02); heldout_rescore can set
+        # the selected checkpoint's own lambda instead.
+        "session_curriculum_lambda": float(fine_tune_cfg.get("session_curriculum_lambda", 1.0)),
     }
     if (
         resolved["heldout_finetuning"]["adapt_sessions_per_subject"] is not None
@@ -568,7 +576,10 @@ def _build_local_heldout_bundle(
     heldout_subject_ids: Sequence[Any],
     source_data_cfg: Mapping[str, Any],
     fine_tune_cfg: Mapping[str, Any],
+    session_split_by_subject: Mapping[str, Mapping[str, Any]] | None = None,
+    allow_unassigned_sessions: bool = False,
 ) -> DatasetBundle:
+    """Pack the held-out trials; an explicit per-subject session split replaces eval_every_n."""
     skip_subjects_with_insufficient_sessions = bool(
         fine_tune_cfg.get("skip_subjects_with_insufficient_sessions", True)
     )
@@ -603,6 +614,8 @@ def _build_local_heldout_bundle(
         batch_mode=str(fine_tune_cfg.get("batch_mode", "single")),
         metadata=metadata,
         skip_subjects_with_insufficient_sessions=skip_subjects_with_insufficient_sessions,
+        session_split_by_subject=session_split_by_subject,
+        allow_unassigned_sessions=allow_unassigned_sessions,
     )
 
 
@@ -1108,6 +1121,7 @@ def _save_state_space_figures(
     params: Any,
     bundle: DatasetBundle,
     checkpoint_dir: Path,
+    session_curriculum_lambda: float = 1.0,
 ) -> dict[str, str | None]:
     plot_paths = {
         "subject_embedding_state_space": None,
@@ -1128,7 +1142,7 @@ def _save_state_space_figures(
         params=params,
         raw_df=bundle.raw,
         metadata=bundle.metadata,
-        session_curriculum_lambda=1.0,
+        session_curriculum_lambda=float(session_curriculum_lambda),
     )
     if subject_session_context_fig is not None:
         path = checkpoint_dir / "subject_session_context_state_space.png"
@@ -1454,6 +1468,8 @@ def _evaluate_checkpoint(
         params=params,
         bundle=bundle,
         checkpoint_dir=checkpoint_dir,
+        # Plot the session context at the lambda the fine-tune and scoring use.
+        session_curriculum_lambda=float(fine_tune_cfg.get("session_curriculum_lambda", 1.0)),
     )
     if wandb_run is not None:
         _log_checkpoint_plot_paths_to_wandb(
@@ -1552,6 +1568,92 @@ def _build_final_target_predictions(
         model=model_type,
     )
     return predictions, summarize_binary_trial_predictions(predictions)
+
+
+def _build_trial_probability_table(
+    *,
+    params: Any,
+    make_eval_network: Any,
+    bundle: DatasetBundle,
+) -> pd.DataFrame:
+    """Per-trial GRU choice probabilities for every held-out trial the model sees.
+
+    One row per modelled trial (under ``exclude`` the ignored trials are not in the
+    model's sequence, so they have no row and ``p_ignore`` is NaN). ``split`` is
+    ``eval`` for scored trials (``target_test_mask``) and ``train`` otherwise.
+    """
+    ignore_policy = str(bundle.metadata.get("ignore_policy", "exclude"))
+    xs_full = bundle.extras["dataset"].get_all()["xs"]
+    yhat_full, network_states_full = rnn_utils.eval_network(make_eval_network, params, xs_full)
+    n_action_logits = _infer_n_action_logits(
+        bundle.extras["dataset"], np.asarray(yhat_full), ignore_policy=ignore_policy
+    )
+    output_df = add_gru_model_results(
+        bundle.raw.copy(),
+        np.asarray(network_states_full),
+        np.asarray(yhat_full)[:, :, :n_action_logits],
+        ignore_policy=ignore_policy,
+    )
+    # Scored (eval) membership uses the target-test rule: eval sessions, or the test suffix
+    # of a within-session prefix/suffix split. Train = sessions the fine-tune actually used
+    # (none at K=0, where the optimisation is skipped). Anything else is "none".
+    eval_mask = target_test_mask(output_df, bundle.metadata)
+    tuned_ids = (
+        set()
+        if int(bundle.metadata.get("adapt_sessions_per_subject", -1)) == 0
+        else {str(value) for value in bundle.metadata.get("train_session_ids") or []}
+    )
+    tuned_mask = output_df["ses_idx"].astype(str).isin(tuned_ids).to_numpy()
+    columns = ["subject_id", "ses_idx", "trial", "animal_response"]
+    if "source_ses_idx" in output_df.columns:
+        columns.insert(2, "source_ses_idx")
+    table = output_df[columns].reset_index(drop=True)
+    logits = output_df[[f"choice_logit_{i}" for i in range(n_action_logits)]].to_numpy(
+        dtype=np.float64
+    )
+    log_probabilities, ll_observed, ll_lr = _observed_log_likelihoods(
+        logits, output_df["animal_response"].to_numpy(dtype=int)
+    )
+    probabilities = np.exp(log_probabilities)
+    table["p_left"] = probabilities[:, 0]
+    table["p_right"] = probabilities[:, 1]
+    table["p_ignore"] = probabilities[:, 2] if n_action_logits >= 3 else np.nan
+    table["ll_observed"] = ll_observed
+    table["ll_lr"] = ll_lr
+    table["split"] = np.where(eval_mask, "eval", np.where(tuned_mask, "train", "none"))
+    return table
+
+
+def _observed_log_likelihoods(
+    logits: np.ndarray, responses: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stable float64 log-softmax per trial.
+
+    Returns all classes' log-probabilities, the log-probability of the observed response
+    over the model's classes, and the left/right log-probability renormalised over
+    {left, right} (NaN on ignored trials) -- the engagement-conditional quantity of
+    ``_threeway_likelihood_decomposition``. Working in logs keeps a tiny probability from
+    underflowing to zero.
+    """
+    logits = np.asarray(logits, dtype=np.float64)
+    responses = np.asarray(responses, dtype=int)
+    rows = np.arange(len(responses))
+
+    def _log_softmax(values: np.ndarray) -> np.ndarray:
+        shifted = values - np.max(values, axis=1, keepdims=True)
+        return shifted - np.log(np.sum(np.exp(shifted), axis=1, keepdims=True))
+
+    log_probabilities = _log_softmax(logits)
+    ll_observed = log_probabilities[rows, responses]
+    engaged = responses != 2
+    log_lr = _log_softmax(logits[:, :2])
+    ll_lr = np.where(engaged, log_lr[rows, np.where(engaged, responses, 0)], np.nan)
+    return log_probabilities, ll_observed, ll_lr
+
+
+def _trial_table_normalized_likelihood(table: pd.DataFrame, *, split: str) -> float:
+    """exp(mean log p(observed response)) over one split of a trial probability table."""
+    return float(np.exp(np.mean(table.loc[table["split"] == split, "ll_observed"])))
 
 
 def _plot_checkpoint_metric_curve(
@@ -1814,10 +1916,24 @@ def run_heldout_subject_finetuning_from_config(
                     bundle.metadata.get("session_max_index_by_subject_index") or []
                 ),
             )
-            make_train_network = gru_make_network
-            make_eval_network = gru_make_network
+            session_lambda = float(
+                resolved_config["heldout_finetuning"]["session_curriculum_lambda"]
+            )
+            if session_lambda == 1.0:
+                make_train_network = gru_make_network
+                make_eval_network = gru_make_network
+            else:
+                # The trainer passes its own runtime lambda (1.0 without a schedule), so
+                # bind the requested one for training and evaluation alike.
+                def _gru_at_session_lambda(*_runtime_lambda: Any) -> Any:
+                    return gru_make_network(session_lambda)
+
+                make_train_network = _gru_at_session_lambda
+                make_eval_network = _gru_at_session_lambda
             runtime_model_config = model_config
         else:
+            if float(resolved_config["heldout_finetuning"]["session_curriculum_lambda"]) != 1.0:
+                raise ValueError("heldout_finetuning.session_curriculum_lambda != 1 is GRU-only.")
             disrnn_config, noiseless_config = trainer._build_network_configs(
                 dataset=bundle.extras["dataset"],
                 ignore_policy=ignore_policy,
@@ -1980,6 +2096,25 @@ def run_heldout_subject_finetuning_from_config(
             test_trial_predictions.to_csv(test_trial_predictions_path, index=False)
             _save_json(test_metrics_path, test_metrics)
 
+        trial_predictions_path = None
+        if bool(resolved_config["heldout_finetuning"]["export_trial_predictions"]):
+            if resolved_source_run.model_type != "gru":
+                raise ValueError("export_trial_predictions supports GRU source runs only.")
+            trial_table = _build_trial_probability_table(
+                params=params,
+                make_eval_network=make_eval_network,
+                bundle=bundle,
+            )
+            final_eval_likelihood = float(checkpoint_records[-1]["eval_likelihood"])
+            table_eval_likelihood = _trial_table_normalized_likelihood(trial_table, split="eval")
+            if not np.isclose(table_eval_likelihood, final_eval_likelihood, rtol=1e-4, atol=1e-6):
+                raise AssertionError(
+                    "Per-trial export does not reproduce the final checkpoint evaluation "
+                    f"likelihood: table={table_eval_likelihood}, checkpoint={final_eval_likelihood}."
+                )
+            trial_predictions_path = outputs_dir / "trial_predictions.csv.gz"
+            trial_table.to_csv(trial_predictions_path, index=False)
+
         # Per-held-out-subject / per-session eval likelihood decomposition (from the
         # final checkpoint). Tidy artifact + compact W&B table for downstream paired
         # statistics across data-scaling conditions. Add-only; never gates the run.
@@ -2055,6 +2190,9 @@ def run_heldout_subject_finetuning_from_config(
             "trainable_subject_indices": [int(index) for index in appended_subject_indices],
             "n_steps": int(total_steps),
             "lr": float(resolved_config["heldout_finetuning"]["lr"]),
+            "session_curriculum_lambda": float(
+                resolved_config["heldout_finetuning"]["session_curriculum_lambda"]
+            ),
             "checkpoint_every_n_steps": int(checkpoint_every_n_steps),
             "selection_policy": str(
                 resolved_config["heldout_finetuning"]["selection_policy"]
@@ -2074,6 +2212,9 @@ def run_heldout_subject_finetuning_from_config(
                 ),
                 "test_metrics": (
                     str(test_metrics_path) if test_metrics_path is not None else None
+                ),
+                "trial_predictions": (
+                    str(trial_predictions_path) if trial_predictions_path is not None else None
                 ),
                 "optimization_trace": str(outputs_dir / "optimization_trace.json"),
                 "model_config": str(model_config_path),
@@ -2136,6 +2277,9 @@ def run_heldout_subject_finetuning_from_config(
             ),
             "test_metrics_path": (
                 str(test_metrics_path) if test_metrics_path is not None else None
+            ),
+            "trial_predictions_path": (
+                str(trial_predictions_path) if trial_predictions_path is not None else None
             ),
             "params_path": str(outputs_dir / "params.json"),
             "subject_index_map_path": subject_artifacts["subject_index_map"],
