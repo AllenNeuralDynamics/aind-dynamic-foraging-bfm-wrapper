@@ -1121,6 +1121,7 @@ def _save_state_space_figures(
     params: Any,
     bundle: DatasetBundle,
     checkpoint_dir: Path,
+    session_curriculum_lambda: float = 1.0,
 ) -> dict[str, str | None]:
     plot_paths = {
         "subject_embedding_state_space": None,
@@ -1141,7 +1142,7 @@ def _save_state_space_figures(
         params=params,
         raw_df=bundle.raw,
         metadata=bundle.metadata,
-        session_curriculum_lambda=1.0,
+        session_curriculum_lambda=float(session_curriculum_lambda),
     )
     if subject_session_context_fig is not None:
         path = checkpoint_dir / "subject_session_context_state_space.png"
@@ -1467,6 +1468,8 @@ def _evaluate_checkpoint(
         params=params,
         bundle=bundle,
         checkpoint_dir=checkpoint_dir,
+        # Plot the session context at the lambda the fine-tune and scoring use.
+        session_curriculum_lambda=float(fine_tune_cfg.get("session_curriculum_lambda", 1.0)),
     )
     if wandb_run is not None:
         _log_checkpoint_plot_paths_to_wandb(

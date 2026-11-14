@@ -524,6 +524,19 @@ class TestHeldoutRescore(unittest.TestCase):
             )
         self.assertEqual(hydrate.call_args.kwargs["dest"], out.resolve() / "source" / "ent__proj__run-x")
 
+    def test_session_context_plots_use_the_scoring_lambda(self):
+        from model_trainers.gru_trainer import GruTrainer
+
+        model_dir = self._source_run("include", session_conditioning=True)
+        roles = self._alternation_roles("include")
+        for mode, expected in (("checkpoint", 0.0), ("1", 1.0)):
+            with mock.patch.object(
+                GruTrainer, "_plot_subject_session_context_state_space", return_value=None
+            ) as plot:
+                self._rescore(model_dir, roles, "--session-lambda", mode)
+            lambdas = {call.kwargs["session_curriculum_lambda"] for call in plot.call_args_list}
+            self.assertEqual(lambdas, {expected})
+
     def test_two_way_model_has_no_ignore_probability(self):
         model_dir = self._source_run("exclude")
         out, _ = self._rescore(model_dir, self._alternation_roles("exclude"))
