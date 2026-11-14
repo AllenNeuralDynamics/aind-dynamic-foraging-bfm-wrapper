@@ -29,7 +29,10 @@ try:
         run_heldout_subject_finetuning_from_config,
     )
     from resume_heldout_beaker import _build_finetune_config
-    from utils.multisubject import compute_train_eval_session_ids
+    from utils.multisubject import (
+        compute_train_eval_session_ids,
+        prepend_session_index_to_multisubject_split_datasets,
+    )
     from utils.session_regularized_training import train_network_with_session_regularization
 
     DEPS_AVAILABLE = True
@@ -139,9 +142,9 @@ class TestHeldoutRescore(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _source_run(self, ignore_policy: str) -> Path:
+    def _source_run(self, ignore_policy: str, session_conditioning: bool = False) -> Path:
         """A source run dir with two checkpoints: step 10 (best eval, lambda 0) and step 20."""
-        model_dir = self.tmp / f"source_{ignore_policy}"
+        model_dir = self.tmp / f"source_{ignore_policy}{'_session' if session_conditioning else ''}"
         outputs = model_dir / "outputs"
         outputs.mkdir(parents=True)
         bundle = mice_loader._build_multisubject_bundle(
@@ -161,7 +164,11 @@ class TestHeldoutRescore(unittest.TestCase):
             "num_layers": 1,
             "subject_embedding_size": 2,
             "subject_embedding_init": "zeros",
-            "session_encoding_type": "none",
+            "session_encoding_type": "scalar" if session_conditioning else "none",
+            "session_integration_type": "direct",
+            "session_fourier_k": 4,
+            "session_delta_n_layers": 2,
+            "session_delta_hidden_size": 4,
         }
         network = make_gru_network(
             hidden_size=5,
@@ -169,7 +176,22 @@ class TestHeldoutRescore(unittest.TestCase):
             multisubject=True,
             max_n_subjects=len(TRAIN_SUBJECTS),
             subject_embedding_size=2,
+            session_encoding_type=architecture["session_encoding_type"],
+            session_delta_n_layers=2,
+            session_delta_hidden_size=4,
+            session_max_index_by_subject_index=bundle.metadata["session_max_index_by_subject_index"],
         )
+        if session_conditioning:
+            _, train_set, eval_set = prepend_session_index_to_multisubject_split_datasets(
+                dataset=bundle.extras["dataset"],
+                dataset_train=bundle.train_set,
+                dataset_eval=bundle.eval_set,
+                metadata=bundle.metadata,
+            )
+            bundle = bundle.__class__(
+                raw=bundle.raw, train_set=train_set, eval_set=eval_set,
+                metadata=bundle.metadata, extras=bundle.extras,
+            )
         params, _, _ = train_network_with_session_regularization(
             lambda session_curriculum_lambda=1.0: network(session_curriculum_lambda),
             bundle.train_set,
@@ -212,6 +234,9 @@ class TestHeldoutRescore(unittest.TestCase):
                     },
                 }
             )
+        )
+        (outputs / "session_context_map.json").write_text(
+            json.dumps(bundle.metadata["session_context"])
         )
         inputs = {
             "data": {
@@ -286,7 +311,9 @@ class TestHeldoutRescore(unittest.TestCase):
         )["records"]
         expected = {r["heldout_subject_id"]: r["likelihood"] for r in records if r["ses_idx"] is None}
 
-        out, manifest = self._rescore(model_dir, self._alternation_roles("include"))
+        out, manifest = self._rescore(
+            model_dir, self._alternation_roles("include"), "--session-lambda", "1"
+        )
         mice = pd.read_csv(out / "mouse_scores.csv", dtype={"subject_id": str})
         scored = mice[mice["use"] == "scored"].set_index("subject_id")
         self.assertEqual(sorted(scored.index), sorted(expected))
@@ -320,7 +347,62 @@ class TestHeldoutRescore(unittest.TestCase):
         # best_eval picked step 10, whose lambda is 0; the scoring lambda (1) is recorded next to it.
         self.assertEqual(manifest["checkpoint"]["step"], 10)
         self.assertEqual(manifest["checkpoint"]["session_curriculum_lambda"], 0.0)
-        self.assertEqual(manifest["checkpoint"]["finetune_session_curriculum_lambda"], 1.0)
+        # Default --session-lambda checkpoint: the fine-tune and scoring use that lambda.
+        self.assertEqual(manifest["checkpoint"]["session_lambda_mode"], "checkpoint")
+        self.assertEqual(manifest["checkpoint"]["finetune_session_curriculum_lambda"], 0.0)
+        trials = pd.read_csv(out_a / "trial_predictions.csv.gz")
+        self.assertTrue((trials["session_lambda"] == 0.0).all())
+        self.assertTrue((trials["checkpoint_lambda"] == 0.0).all())
+
+    def test_session_lambda_zero_makes_the_session_delta_inert(self):
+        """At the checkpoint's lambda (0) perturbing the session-delta params changes nothing;
+        at lambda 1 it does, and 1 reproduces the auto fine-tune's lambda."""
+        model_dir = self._source_run("include", session_conditioning=True)
+        roles = self._alternation_roles("include")
+        runs = {}
+        for perturbed in (False, True):
+            if perturbed:
+                for step in (10, 20):
+                    path = model_dir / "outputs" / "checkpoints" / f"step_{step}" / "params.json"
+                    params = json.loads(path.read_text())
+                    session_keys = [key for key in params if "session" in key]
+                    self.assertTrue(session_keys)
+                    for key in session_keys:
+                        params[key] = {
+                            name: (np.asarray(value) + 0.7).tolist()
+                            for name, value in params[key].items()
+                        }
+                    path.write_text(json.dumps(params))
+            for mode in ("checkpoint", "1"):
+                out, manifest = self._rescore(model_dir, roles, "--session-lambda", mode)
+                runs[(perturbed, mode)] = pd.read_csv(out / "trial_predictions.csv.gz")
+                if not perturbed and mode == "1":
+                    # lambda 1 reproduces the auto held-out fine-tune on this model.
+                    config = _build_finetune_config(
+                        yaml.safe_load((model_dir / "inputs.yaml").read_text()), model_dir
+                    )
+                    config["output"]["output_root"] = str(self.tmp / "existing_session")
+                    with mock.patch(
+                        LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))
+                    ):
+                        existing = run_heldout_subject_finetuning_from_config(config)
+                    summary = json.loads(Path(existing["summary_path"]).read_text())
+                    scored = runs[(perturbed, mode)].query("use == 'scored'")
+                    self.assertAlmostEqual(
+                        float(np.exp(scored["ll_3way"].mean())),
+                        summary["metrics"]["eval_likelihood"],
+                        places=5,
+                    )
+                expected = 0.0 if mode == "checkpoint" else 1.0
+                self.assertEqual(manifest["checkpoint"]["finetune_session_curriculum_lambda"], expected)
+                self.assertTrue((runs[(perturbed, mode)]["session_lambda"] == expected).all())
+        columns = ["p_left", "p_right", "p_ignore"]
+        np.testing.assert_allclose(
+            runs[(False, "checkpoint")][columns], runs[(True, "checkpoint")][columns], rtol=1e-6
+        )
+        self.assertFalse(
+            np.allclose(runs[(False, "1")][columns], runs[(True, "1")][columns], rtol=1e-6)
+        )
 
     def test_sessions_missing_from_either_side_are_reported_and_unused(self):
         model_dir = self._source_run("include")

@@ -19,9 +19,11 @@ trial; p_ignore is NaN for a 2-way model), ``session_scores.csv`` and ``mouse_sc
 (summed log-likelihoods and trial counts, left/right on engaged trials and full 3-way),
 ``subject_embeddings.csv`` (the fine-tuned embedding per mouse) and ``manifest.json``.
 
-The fine-tune and the scoring run the network at session_curriculum_lambda = 1, as the
-held-out fine-tune always has. The manifest records the selected checkpoint's own lambda
-next to it, so a checkpoint chosen at lambda = 0 is visible.
+``--session-lambda`` sets the session_curriculum_lambda used in BOTH the fine-tune and the
+scoring forward pass: ``checkpoint`` (default) uses the selected checkpoint's own lambda, so
+a checkpoint chosen at lambda = 0 is scored with the session delta off, as it was selected;
+``1`` is the auto held-out fine-tune's behaviour (studies 01/02). The manifest and the
+per-trial table record the checkpoint's lambda and the lambda used.
 
 Run from the wrapper's ``code/``::
 
@@ -46,9 +48,6 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 ROLES = ("fit", "score")
-# Session-conditioning lambda the held-out fine-tune and its scoring always use
-# (make_gru_network's default; heldout_finetuning passes no schedule).
-FINETUNE_SESSION_CURRICULUM_LAMBDA = 1.0
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -206,16 +205,25 @@ def summarize_scores(table: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
     ).reset_index()
 
 
-def checkpoint_lambda(model_dir: str | Path, step: int | None) -> float | None:
-    """The session_curriculum_lambda recorded for one checkpoint step, if any."""
-    index_path = Path(model_dir) / "outputs" / "checkpoints" / "index.json"
-    if step is None or not index_path.exists():
-        return None
-    for record in json.loads(index_path.read_text()).get("checkpoints", []) or []:
-        if record.get("step") is not None and int(record["step"]) == int(step):
-            value = record.get("session_curriculum_lambda")
-            return None if value is None else float(value)
-    return None
+def checkpoint_lambda(model_dir: str | Path, step: int | None, *, final: bool = False) -> float | None:
+    """The session_curriculum_lambda recorded for one checkpoint, if any.
+
+    Looks up the step in ``checkpoints/index.json``, then in ``output_summary.json``'s
+    checkpoint list; for the final params it falls back to the summary's
+    ``session_curriculum.final_lambda``.
+    """
+    outputs = Path(model_dir) / "outputs"
+    index_path = outputs / "checkpoints" / "index.json"
+    summary_path = outputs / "output_summary.json"
+    index = json.loads(index_path.read_text()) if index_path.exists() else {}
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    if step is not None:
+        for record in [*(index.get("checkpoints") or []), *(summary.get("checkpoints") or [])]:
+            if record.get("step") is not None and int(record["step"]) == int(step):
+                if record.get("session_curriculum_lambda") is not None:
+                    return float(record["session_curriculum_lambda"])
+    final_lambda = (summary.get("session_curriculum") or {}).get("final_lambda")
+    return float(final_lambda) if final and final_lambda is not None else None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -238,6 +246,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=None, help="Default: the source run's.")
     parser.add_argument("--n-steps", type=int, default=None, help="Default: the source run's.")
     parser.add_argument("--lr", type=float, default=None, help="Default: the source run's.")
+    parser.add_argument(
+        "--session-lambda",
+        choices=("checkpoint", "1"),
+        default="checkpoint",
+        help="session_curriculum_lambda for the fine-tune and scoring: the selected "
+        "checkpoint's own (default) or 1 (the auto held-out fine-tune, studies 01/02).",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--wandb-entity", default=None)
     parser.add_argument("--wandb-project", default=None, help="Log to a NEW run here.")
@@ -299,6 +314,19 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     )
     if source_run.model_type != "gru":
         raise ValueError("heldout_rescore supports GRU source runs only.")
+    selected_lambda = checkpoint_lambda(
+        model_dir, source_run.checkpoint_step, final=source_run.checkpoint_label == "final"
+    )
+    if args.session_lambda == "checkpoint":
+        if selected_lambda is None:
+            raise ValueError(
+                f"--session-lambda checkpoint: no session_curriculum_lambda recorded for "
+                f"checkpoint {source_run.checkpoint_label}; pass --session-lambda 1 explicitly."
+            )
+        session_lambda = selected_lambda
+    else:
+        session_lambda = 1.0
+    config["heldout_finetuning"]["session_curriculum_lambda"] = session_lambda
     resolved = hf._resolve_runtime_config(config, source_run=source_run, output_root_override=None)
     bundle, reconciliation = build_rescore_bundle(
         source_run=source_run,
@@ -316,9 +344,11 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         "label": source_run.checkpoint_label,
         "params_path": source_run.params_path,
         "params_sha256": _sha256_bytes(Path(source_run.params_path).read_bytes()),
-        "session_curriculum_lambda": checkpoint_lambda(model_dir, source_run.checkpoint_step),
+        "session_curriculum_lambda": selected_lambda,
         "session_conditioning": str(architecture.get("session_encoding_type", "none")),
-        "finetune_session_curriculum_lambda": FINETUNE_SESSION_CURRICULUM_LAMBDA,
+        # The lambda actually used in the fine-tune and the scoring forward pass.
+        "session_lambda_mode": args.session_lambda,
+        "finetune_session_curriculum_lambda": session_lambda,
     }
     manifest: dict[str, Any] = {
         "tool": "post_training_analysis.heldout_rescore",
@@ -357,7 +387,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         reconciliation["n_subjects_scored"],
         checkpoint["label"],
         checkpoint["session_curriculum_lambda"],
-        FINETUNE_SESSION_CURRICULUM_LAMBDA,
+        session_lambda,
     )
 
     wandb_run = None
@@ -398,6 +428,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         trials["source_run_id"] = args.run_id
         trials["checkpoint_step"] = checkpoint["step"]
         trials["checkpoint_lambda"] = checkpoint["session_curriculum_lambda"]
+        trials["session_lambda"] = session_lambda
         # ll_observed is the log-probability over the model's classes: 3-way only for a
         # 3-way model. ll_lr (engaged trials, renormalised over left/right) comes as is.
         three_way = bool(trials["p_ignore"].notna().all())
@@ -405,7 +436,7 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         columns = [
             "subject_id", "session_id", "trial", "response", "p_left", "p_right", "p_ignore",
             "role", "pass", "use", "ll_lr", "ll_3way",
-            "source_run_id", "checkpoint_step", "checkpoint_lambda",
+            "source_run_id", "checkpoint_step", "checkpoint_lambda", "session_lambda",
         ]
         trials = trials[columns]
         session_scores = summarize_scores(trials, ["subject_id", "session_id", "role", "pass", "use"])

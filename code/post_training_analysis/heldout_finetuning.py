@@ -404,6 +404,10 @@ def _resolve_runtime_config(
         # Opt-in per-trial export (GRU): p(left), p(right), p(ignore) for every
         # held-out trial, fine-tuned and scored sessions alike. Off by default.
         "export_trial_predictions": bool(fine_tune_cfg.get("export_trial_predictions", False)),
+        # Session-conditioning gate used in BOTH the fine-tune and the scoring forward pass
+        # (GRU). 1.0 is the long-standing default (studies 01/02); heldout_rescore can set
+        # the selected checkpoint's own lambda instead.
+        "session_curriculum_lambda": float(fine_tune_cfg.get("session_curriculum_lambda", 1.0)),
     }
     if (
         resolved["heldout_finetuning"]["adapt_sessions_per_subject"] is not None
@@ -1909,10 +1913,24 @@ def run_heldout_subject_finetuning_from_config(
                     bundle.metadata.get("session_max_index_by_subject_index") or []
                 ),
             )
-            make_train_network = gru_make_network
-            make_eval_network = gru_make_network
+            session_lambda = float(
+                resolved_config["heldout_finetuning"]["session_curriculum_lambda"]
+            )
+            if session_lambda == 1.0:
+                make_train_network = gru_make_network
+                make_eval_network = gru_make_network
+            else:
+                # The trainer passes its own runtime lambda (1.0 without a schedule), so
+                # bind the requested one for training and evaluation alike.
+                def _gru_at_session_lambda(*_runtime_lambda: Any) -> Any:
+                    return gru_make_network(session_lambda)
+
+                make_train_network = _gru_at_session_lambda
+                make_eval_network = _gru_at_session_lambda
             runtime_model_config = model_config
         else:
+            if float(resolved_config["heldout_finetuning"]["session_curriculum_lambda"]) != 1.0:
+                raise ValueError("heldout_finetuning.session_curriculum_lambda != 1 is GRU-only.")
             disrnn_config, noiseless_config = trainer._build_network_configs(
                 dataset=bundle.extras["dataset"],
                 ignore_policy=ignore_policy,
@@ -2169,6 +2187,9 @@ def run_heldout_subject_finetuning_from_config(
             "trainable_subject_indices": [int(index) for index in appended_subject_indices],
             "n_steps": int(total_steps),
             "lr": float(resolved_config["heldout_finetuning"]["lr"]),
+            "session_curriculum_lambda": float(
+                resolved_config["heldout_finetuning"]["session_curriculum_lambda"]
+            ),
             "checkpoint_every_n_steps": int(checkpoint_every_n_steps),
             "selection_policy": str(
                 resolved_config["heldout_finetuning"]["selection_policy"]

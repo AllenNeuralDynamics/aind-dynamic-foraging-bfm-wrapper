@@ -256,9 +256,12 @@ explicitly:
    Requested mice that the source run trained on are refused.
    Fine-tune settings default to the source run's `auto_heldout_finetune` (as
    `resume_heldout_beaker.py`). All held-out mice are tuned in one joint optimisation, as in
-   the auto path. The fine-tune and scoring run at session_curriculum_lambda = 1; the
-   manifest records the selected checkpoint's own lambda next to it. W&B logging (optional)
-   creates a new run.
+   the auto path. `--session-lambda {checkpoint,1}` (default `checkpoint`) sets the
+   session_curriculum_lambda of BOTH the fine-tune and the scoring forward pass: the selected
+   checkpoint's own lambda (from `checkpoints/index.json` / `output_summary.json`), or 1 as in
+   the auto held-out fine-tune (`heldout_finetuning.session_curriculum_lambda`, default 1.0,
+   so studies 01/02 reproduce). The manifest and the per-trial table record the checkpoint's
+   lambda and the lambda used. W&B logging (optional) creates a new run.
 2. **`likelihood_comparison._evaluate_disrnn_dataset`** — for the **multisubject
    disRNN** case only, it borrows the trainer's network-construction helpers
    (single-subject eval uses `evaluation.disrnn_evaluation`'s own builder).
@@ -334,7 +337,9 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
 - **`post_training_analysis.heldout_rescore`** (wrapper #126): held-out re-scoring with an
   explicit fit/score session table and a swap, a 3-way per-trial export, per-mouse
   embeddings and a manifest ([§7](#7-training-adjacent-exceptions)). `resolve_model_run`
-  accepts `checkpoint_policy="step_<N>"`. The default held-out fine-tune is unchanged.
+  accepts `checkpoint_policy="step_<N>"`. Opt-in `heldout_finetuning.session_curriculum_lambda`
+  (default 1.0) sets the GRU's session lambda for the fine-tune and its scoring. The default
+  held-out fine-tune is unchanged.
 
 ### 2026-10-24
 - **`external_transfer.gru_transfer`** moved here from study 09's `run_gru_transfer.py`
