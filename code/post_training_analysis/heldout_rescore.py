@@ -314,6 +314,13 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     )
     if source_run.model_type != "gru":
         raise ValueError("heldout_rescore supports GRU source runs only.")
+    # index.json may hold absolute paths from the training machine; one that happens to
+    # exist here could be another run's file. Score only params inside this run's dir.
+    if not Path(source_run.params_path).resolve().is_relative_to(Path(model_dir).resolve()):
+        raise ValueError(
+            f"Selected params {source_run.params_path} lie outside the source run dir "
+            f"{model_dir}; refusing to score another run's checkpoint."
+        )
     selected_lambda = checkpoint_lambda(
         model_dir, source_run.checkpoint_step, final=source_run.checkpoint_label == "final"
     )

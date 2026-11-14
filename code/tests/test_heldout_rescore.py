@@ -524,6 +524,17 @@ class TestHeldoutRescore(unittest.TestCase):
             )
         self.assertEqual(hydrate.call_args.kwargs["dest"], out.resolve() / "source" / "ent__proj__run-x")
 
+    def test_checkpoint_outside_the_source_run_is_refused(self):
+        model_dir = self._source_run("include")
+        other = self._source_run("exclude")
+        index_path = model_dir / "outputs" / "checkpoints" / "index.json"
+        index = json.loads(index_path.read_text())
+        # An absolute path left over from another machine that exists here, in another run.
+        index["checkpoints"][0]["params_path"] = str(other / "outputs" / "params.json")
+        index_path.write_text(json.dumps(index))
+        with self.assertRaisesRegex(ValueError, "outside the source run dir"):
+            self._rescore(model_dir, self._alternation_roles("include"))
+
     def test_session_context_plots_use_the_scoring_lambda(self):
         from model_trainers.gru_trainer import GruTrainer
 
