@@ -384,6 +384,64 @@ class TestHeldoutRescore(unittest.TestCase):
         self.assertEqual(sorted(trials.loc[trials["split"] == "eval", "trial"]), list(range(12, N_TRIALS)))
         self.assertEqual(sorted(trials.loc[trials["split"] == "train", "trial"]), list(range(12)))
 
+    def test_trial_export_marks_only_budgeted_adaptation_sessions_as_train(self):
+        model_dir = self._source_run("include")
+        for budget, expected_train_sessions in ((0, 0), (1, len(HELDOUT_SUBJECTS))):
+            config = _build_finetune_config(
+                yaml.safe_load((model_dir / "inputs.yaml").read_text()), model_dir
+            )
+            config["output"]["output_root"] = str(self.tmp / f"budget_{budget}")
+            config["heldout_finetuning"]["export_trial_predictions"] = True
+            config["heldout_finetuning"]["adapt_sessions_per_subject"] = budget
+            with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
+                result = run_heldout_subject_finetuning_from_config(config)
+            trials = pd.read_csv(result["trial_predictions_path"])
+            self.assertEqual(trials.loc[trials["split"] == "train", "ses_idx"].nunique(), expected_train_sessions)
+            self.assertGreater((trials["split"] == "none").sum(), 0)
+
+    def test_sessions_without_a_role_keep_their_session_index(self):
+        model_dir = self._source_run("include")
+        roles = pd.read_csv(self._alternation_roles("include"), dtype=str)
+        subject = HELDOUT_SUBJECTS[0]
+        dropped = sorted(roles.loc[roles["subject_id"] == subject, "session_id"])[0]
+        roles = roles[roles["session_id"] != dropped]
+        with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
+            bundle, report = heldout_rescore.build_rescore_bundle(
+                source_run=resolve_model_run(model_dir),
+                heldout_selector={"test_subject_ids": list(HELDOUT_SUBJECTS)},
+                fine_tune_cfg={"batch_size": None, "batch_mode": "single"},
+                roles=roles,
+                swap=False,
+            )
+        self.assertEqual(report["sessions_in_loader_not_in_table"]["session_ids"], [dropped])
+        context = {
+            row["subject_id"]: row["ordered_source_session_ids"]
+            for row in bundle.metadata["session_context"]["per_subject"]
+        }
+        self.assertEqual(len(context[subject]), N_SESSIONS)  # still packed, same indices
+        self.assertEqual(bundle.metadata["session_max_index_by_subject_index"], [N_SESSIONS] * 2)
+        used = bundle.metadata["train_session_ids"] + bundle.metadata["eval_session_ids"]
+        self.assertNotIn(f"{subject}__{dropped}", used)
+        self.assertEqual(len(used), 2 * N_SESSIONS - 1)
+
+    def test_run_id_source_is_hydrated_into_its_own_directory(self):
+        model_dir = self._source_run("include")
+        out = self.tmp / "hydrated"
+        with mock.patch(
+            "post_training_analysis.wandb_model_dir.hydrate_model_dir", return_value=model_dir
+        ) as hydrate, mock.patch(
+            LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))
+        ):
+            heldout_rescore.main(
+                [
+                    "--run-id", "run-x", "--entity", "ent", "--project", "proj",
+                    "--subjects", ",".join(HELDOUT_SUBJECTS),
+                    "--roles", str(self._alternation_roles("include")),
+                    "--output-dir", str(out),
+                ]
+            )
+        self.assertEqual(hydrate.call_args.kwargs["dest"], out.resolve() / "source" / "ent__proj__run-x")
+
     def test_two_way_model_has_no_ignore_probability(self):
         model_dir = self._source_run("exclude")
         out, _ = self._rescore(model_dir, self._alternation_roles("exclude"))
@@ -392,6 +450,21 @@ class TestHeldoutRescore(unittest.TestCase):
         self.assertTrue(trials["ll_3way"].isna().all())
         self.assertFalse((trials["response"] == 2).any())
         np.testing.assert_allclose(trials[["p_left", "p_right"]].sum(axis=1), 1.0, rtol=1e-5)
+
+
+@unittest.skipUnless(DEPS_AVAILABLE, f"dependencies unavailable: {IMPORT_ERROR}")
+class TestObservedLogLikelihoods(unittest.TestCase):
+    def test_tiny_probabilities_do_not_underflow(self):
+        from post_training_analysis.heldout_finetuning import _observed_log_likelihoods
+
+        # float32 softmax rounds exp(-200) to 0; the log-softmax keeps it finite.
+        logits = np.array([[0.0, -200.0, -200.0], [0.0, -200.0, 5.0], [1.0, 2.0, 3.0]], dtype=np.float32)
+        log_p, ll_observed, ll_lr = _observed_log_likelihoods(logits, np.array([1, 1, 2]))
+        self.assertAlmostEqual(ll_observed[0], -200.0, places=4)
+        self.assertTrue(np.isfinite(ll_observed).all())
+        self.assertAlmostEqual(ll_lr[1], -200.0, places=4)  # renormalised over left/right
+        self.assertTrue(np.isnan(ll_lr[2]))  # ignored trial
+        np.testing.assert_allclose(np.exp(log_p).sum(axis=1), 1.0)
 
 
 @unittest.skipUnless(DEPS_AVAILABLE, f"dependencies unavailable: {IMPORT_ERROR}")

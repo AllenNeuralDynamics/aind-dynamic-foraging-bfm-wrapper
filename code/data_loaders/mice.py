@@ -368,8 +368,14 @@ def _build_multisubject_bundle(
     skip_subjects_with_insufficient_sessions: bool = False,
     session_split_by_subject: Mapping[str, Mapping[str, object]] | None = None,
     trial_split_by_subject: Mapping[str, Mapping[str, object]] | None = None,
+    allow_unassigned_sessions: bool = False,
 ) -> DatasetBundle:
-    """Build a merged multisubject dataset bundle from a trial dataframe."""
+    """Build a merged multisubject dataset bundle from a trial dataframe.
+
+    With ``allow_unassigned_sessions``, an explicit session split may leave sessions out of
+    both lists: they stay in the full dataset (so every session keeps its session index)
+    but are neither adaptation nor test sessions.
+    """
     if session_split_by_subject is not None and trial_split_by_subject is not None:
         raise ValueError("Specify either a session split or a trial split, not both.")
     if "subject_id" not in df.columns:
@@ -498,7 +504,8 @@ def _build_multisubject_bundle(
                     "explicit split manifest."
                 )
             available_ids = set(source_to_session_id)
-            if set(requested_ids) != available_ids:
+            unassigned_ok = allow_unassigned_sessions and set(requested_ids) <= available_ids
+            if set(requested_ids) != available_ids and not unassigned_ok:
                 missing = sorted(available_ids - set(requested_ids))
                 unknown = sorted(set(requested_ids) - available_ids)
                 raise ValueError(

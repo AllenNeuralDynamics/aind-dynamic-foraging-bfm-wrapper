@@ -573,6 +573,7 @@ def _build_local_heldout_bundle(
     source_data_cfg: Mapping[str, Any],
     fine_tune_cfg: Mapping[str, Any],
     session_split_by_subject: Mapping[str, Mapping[str, Any]] | None = None,
+    allow_unassigned_sessions: bool = False,
 ) -> DatasetBundle:
     """Pack the held-out trials; an explicit per-subject session split replaces eval_every_n."""
     skip_subjects_with_insufficient_sessions = bool(
@@ -610,6 +611,7 @@ def _build_local_heldout_bundle(
         metadata=metadata,
         skip_subjects_with_insufficient_sessions=skip_subjects_with_insufficient_sessions,
         session_split_by_subject=session_split_by_subject,
+        allow_unassigned_sessions=allow_unassigned_sessions,
     )
 
 
@@ -1585,31 +1587,66 @@ def _build_trial_probability_table(
         np.asarray(yhat_full)[:, :, :n_action_logits],
         ignore_policy=ignore_policy,
     )
-    # Same membership rule as the scored target-test table: eval sessions, or the test
-    # suffix of a within-session prefix/suffix split. Every other modelled trial is train.
+    # Scored (eval) membership uses the target-test rule: eval sessions, or the test suffix
+    # of a within-session prefix/suffix split. Train = sessions the fine-tune actually used
+    # (none at K=0, where the optimisation is skipped). Anything else is "none".
     eval_mask = target_test_mask(output_df, bundle.metadata)
+    tuned_ids = (
+        set()
+        if int(bundle.metadata.get("adapt_sessions_per_subject", -1)) == 0
+        else {str(value) for value in bundle.metadata.get("train_session_ids") or []}
+    )
+    tuned_mask = output_df["ses_idx"].astype(str).isin(tuned_ids).to_numpy()
     columns = ["subject_id", "ses_idx", "trial", "animal_response"]
     if "source_ses_idx" in output_df.columns:
         columns.insert(2, "source_ses_idx")
     table = output_df[columns].reset_index(drop=True)
-    table["p_left"] = output_df["choice_prob_0"].to_numpy(dtype=float)
-    table["p_right"] = output_df["choice_prob_1"].to_numpy(dtype=float)
-    table["p_ignore"] = (
-        output_df["choice_prob_2"].to_numpy(dtype=float)
-        if n_action_logits >= 3
-        else np.nan
+    logits = output_df[[f"choice_logit_{i}" for i in range(n_action_logits)]].to_numpy(
+        dtype=np.float64
     )
-    table["split"] = np.where(eval_mask, "eval", "train")
+    log_probabilities, ll_observed, ll_lr = _observed_log_likelihoods(
+        logits, output_df["animal_response"].to_numpy(dtype=int)
+    )
+    probabilities = np.exp(log_probabilities)
+    table["p_left"] = probabilities[:, 0]
+    table["p_right"] = probabilities[:, 1]
+    table["p_ignore"] = probabilities[:, 2] if n_action_logits >= 3 else np.nan
+    table["ll_observed"] = ll_observed
+    table["ll_lr"] = ll_lr
+    table["split"] = np.where(eval_mask, "eval", np.where(tuned_mask, "train", "none"))
     return table
+
+
+def _observed_log_likelihoods(
+    logits: np.ndarray, responses: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stable float64 log-softmax per trial.
+
+    Returns all classes' log-probabilities, the log-probability of the observed response
+    over the model's classes, and the left/right log-probability renormalised over
+    {left, right} (NaN on ignored trials) -- the engagement-conditional quantity of
+    ``_threeway_likelihood_decomposition``. Working in logs keeps a tiny probability from
+    underflowing to zero.
+    """
+    logits = np.asarray(logits, dtype=np.float64)
+    responses = np.asarray(responses, dtype=int)
+    rows = np.arange(len(responses))
+
+    def _log_softmax(values: np.ndarray) -> np.ndarray:
+        shifted = values - np.max(values, axis=1, keepdims=True)
+        return shifted - np.log(np.sum(np.exp(shifted), axis=1, keepdims=True))
+
+    log_probabilities = _log_softmax(logits)
+    ll_observed = log_probabilities[rows, responses]
+    engaged = responses != 2
+    log_lr = _log_softmax(logits[:, :2])
+    ll_lr = np.where(engaged, log_lr[rows, np.where(engaged, responses, 0)], np.nan)
+    return log_probabilities, ll_observed, ll_lr
 
 
 def _trial_table_normalized_likelihood(table: pd.DataFrame, *, split: str) -> float:
     """exp(mean log p(observed response)) over one split of a trial probability table."""
-    rows = table[table["split"] == split]
-    probabilities = rows[["p_left", "p_right", "p_ignore"]].to_numpy(dtype=float)
-    responses = rows["animal_response"].to_numpy(dtype=int)
-    chosen = probabilities[np.arange(len(rows)), responses]
-    return float(np.exp(np.mean(np.log(chosen))))
+    return float(np.exp(np.mean(table.loc[table["split"] == split, "ll_observed"])))
 
 
 def _plot_checkpoint_metric_curve(

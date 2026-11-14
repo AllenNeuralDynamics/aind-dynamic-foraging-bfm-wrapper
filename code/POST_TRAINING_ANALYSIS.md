@@ -250,7 +250,10 @@ explicitly:
    `subject_id, session_id, role` table (`fit`/`score`); pass A tunes the embedding on `fit`
    and scores `score`, `--swap` (pass B) inverts. The table replaces the `eval_every_n`
    alternation through `_build_multisubject_bundle(session_split_by_subject=...)`; sessions
-   only the loader has, or only the table has, are listed in `manifest.json` and not used.
+   only the loader has, or only the table has, are listed in `manifest.json` and are neither
+   tuned nor scored. Loader sessions without a role stay in the packed sequence
+   (`allow_unassigned_sessions`), so every session keeps its training-time session index.
+   Requested mice that the source run trained on are refused.
    Fine-tune settings default to the source run's `auto_heldout_finetune` (as
    `resume_heldout_beaker.py`). All held-out mice are tuned in one joint optimisation, as in
    the auto path. The fine-tune and scoring run at session_curriculum_lambda = 1; the

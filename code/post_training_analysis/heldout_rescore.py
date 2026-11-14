@@ -180,31 +180,19 @@ def build_rescore_bundle(
     split, report = reconcile_session_roles(
         loader_sessions, roles, subjects=[str(s) for s in subject_ids], swap=swap
     )
-    used_sessions = {s for v in split.values() for s in v["adapt_session_ids"] + v["test_session_ids"]}
-    heldout_df = heldout_df[heldout_df["ses_idx"].astype(str).isin(used_sessions)].copy()
+    # Every loader session stays in the packed sequence, so each session keeps the
+    # session index (and per-mouse maximum) it has in training; sessions without a role
+    # are only left out of the fine-tune and the scoring.
     bundle = hf._build_local_heldout_bundle(
         heldout_df=heldout_df,
         heldout_subject_ids=[str(s) for s in subject_ids if str(s) in split],
         source_data_cfg=source_data_cfg,
         fine_tune_cfg=fine_tune_cfg,
         session_split_by_subject=split,
+        allow_unassigned_sessions=True,
     )
     bundle.metadata["dataset_id"] = f"rescore_pass_{'B' if swap else 'A'}"
     return bundle, report
-
-
-def add_trial_scores(table: pd.DataFrame) -> pd.DataFrame:
-    """Add per-trial log-likelihoods: full 3-way, and left/right on engaged trials."""
-    table = table.copy()
-    response = table["response"].to_numpy(dtype=int)
-    probabilities = table[["p_left", "p_right", "p_ignore"]].to_numpy(dtype=float)
-    p_observed = probabilities[np.arange(len(table)), response]
-    engaged = response != 2
-    three_way = bool(np.isfinite(table["p_ignore"]).all())
-    table["ll_3way"] = np.log(p_observed) if three_way else np.nan
-    p_lr = probabilities[:, 0] + probabilities[:, 1]
-    table["ll_lr"] = np.where(engaged, np.log(np.where(engaged, p_observed, 1.0) / p_lr), np.nan)
-    return table
 
 
 def summarize_scores(table: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
@@ -279,7 +267,11 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         from post_training_analysis.wandb_model_dir import hydrate_model_dir
 
         model_dir = hydrate_model_dir(
-            args.run_id, project=args.project, entity=args.entity, dest=output_dir / "source"
+            args.run_id,
+            project=args.project,
+            entity=args.entity,
+            # One directory per source run, so a reused --output-dir never mixes checkpoints.
+            dest=output_dir / "source" / f"{args.entity}__{args.project}__{args.run_id}",
         )
     else:
         model_dir = Path(args.model_dir).expanduser().resolve()
@@ -397,13 +389,19 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         trials = trials.rename(columns={"animal_response": "response"})
         trials["session_id"] = trials.pop("source_ses_idx").astype(str)
         trials = trials.drop(columns=["ses_idx"])
+        # Sessions without a role are in the model's sequence (for their session index)
+        # but neither tuned nor scored: leave them out of every output table.
+        trials = trials[trials["split"] != "none"].copy()
         trials["role"] = trials["session_id"].map(role_by_session)
         trials["pass"] = pass_label
         trials["use"] = trials.pop("split").map({"train": "tuned", "eval": "scored"})
         trials["source_run_id"] = args.run_id
         trials["checkpoint_step"] = checkpoint["step"]
         trials["checkpoint_lambda"] = checkpoint["session_curriculum_lambda"]
-        trials = add_trial_scores(trials)
+        # ll_observed is the log-probability over the model's classes: 3-way only for a
+        # 3-way model. ll_lr (engaged trials, renormalised over left/right) comes as is.
+        three_way = bool(trials["p_ignore"].notna().all())
+        trials["ll_3way"] = trials.pop("ll_observed") if three_way else np.nan
         columns = [
             "subject_id", "session_id", "trial", "response", "p_left", "p_right", "p_ignore",
             "role", "pass", "use", "ll_lr", "ll_3way",
