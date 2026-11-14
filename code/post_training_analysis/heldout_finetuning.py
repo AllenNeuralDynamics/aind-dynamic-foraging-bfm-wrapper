@@ -400,6 +400,9 @@ def _resolve_runtime_config(
         "skip_subjects_with_insufficient_sessions": bool(
             fine_tune_cfg.get("skip_subjects_with_insufficient_sessions", True)
         ),
+        # Opt-in per-trial export (GRU): p(left), p(right), p(ignore) for every
+        # held-out trial, fine-tuned and scored sessions alike. Off by default.
+        "export_trial_predictions": bool(fine_tune_cfg.get("export_trial_predictions", False)),
     }
     if (
         resolved["heldout_finetuning"]["adapt_sessions_per_subject"] is not None
@@ -568,7 +571,9 @@ def _build_local_heldout_bundle(
     heldout_subject_ids: Sequence[Any],
     source_data_cfg: Mapping[str, Any],
     fine_tune_cfg: Mapping[str, Any],
+    session_split_by_subject: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> DatasetBundle:
+    """Pack the held-out trials; an explicit per-subject session split replaces eval_every_n."""
     skip_subjects_with_insufficient_sessions = bool(
         fine_tune_cfg.get("skip_subjects_with_insufficient_sessions", True)
     )
@@ -603,6 +608,7 @@ def _build_local_heldout_bundle(
         batch_mode=str(fine_tune_cfg.get("batch_mode", "single")),
         metadata=metadata,
         skip_subjects_with_insufficient_sessions=skip_subjects_with_insufficient_sessions,
+        session_split_by_subject=session_split_by_subject,
     )
 
 
@@ -1554,6 +1560,61 @@ def _build_final_target_predictions(
     return predictions, summarize_binary_trial_predictions(predictions)
 
 
+def _build_trial_probability_table(
+    *,
+    params: Any,
+    make_eval_network: Any,
+    bundle: DatasetBundle,
+) -> pd.DataFrame:
+    """Per-trial GRU choice probabilities for every held-out trial the model sees.
+
+    One row per modelled trial (under ``exclude`` the ignored trials are not in the
+    model's sequence, so they have no row and ``p_ignore`` is NaN). ``split`` is
+    ``train`` for fine-tuned sessions and ``eval`` for scored sessions.
+    """
+    ignore_policy = str(bundle.metadata.get("ignore_policy", "exclude"))
+    xs_full = bundle.extras["dataset"].get_all()["xs"]
+    yhat_full, network_states_full = rnn_utils.eval_network(make_eval_network, params, xs_full)
+    n_action_logits = _infer_n_action_logits(
+        bundle.extras["dataset"], np.asarray(yhat_full), ignore_policy=ignore_policy
+    )
+    output_df = add_gru_model_results(
+        bundle.raw.copy(),
+        np.asarray(network_states_full),
+        np.asarray(yhat_full)[:, :, :n_action_logits],
+        ignore_policy=ignore_policy,
+    )
+    train_ids = {str(value) for value in bundle.metadata.get("train_session_ids") or []}
+    eval_ids = {str(value) for value in bundle.metadata.get("eval_session_ids") or []}
+    session_ids = output_df["ses_idx"].astype(str)
+    columns = ["subject_id", "ses_idx", "trial", "animal_response"]
+    if "source_ses_idx" in output_df.columns:
+        columns.insert(2, "source_ses_idx")
+    table = output_df[columns].reset_index(drop=True)
+    table["p_left"] = output_df["choice_prob_0"].to_numpy(dtype=float)
+    table["p_right"] = output_df["choice_prob_1"].to_numpy(dtype=float)
+    table["p_ignore"] = (
+        output_df["choice_prob_2"].to_numpy(dtype=float)
+        if n_action_logits >= 3
+        else np.nan
+    )
+    table["split"] = np.where(
+        session_ids.isin(eval_ids).to_numpy(),
+        "eval",
+        np.where(session_ids.isin(train_ids).to_numpy(), "train", "none"),
+    )
+    return table
+
+
+def _trial_table_normalized_likelihood(table: pd.DataFrame, *, split: str) -> float:
+    """exp(mean log p(observed response)) over one split of a trial probability table."""
+    rows = table[table["split"] == split]
+    probabilities = rows[["p_left", "p_right", "p_ignore"]].to_numpy(dtype=float)
+    responses = rows["animal_response"].to_numpy(dtype=int)
+    chosen = probabilities[np.arange(len(rows)), responses]
+    return float(np.exp(np.mean(np.log(chosen))))
+
+
 def _plot_checkpoint_metric_curve(
     *,
     checkpoint_records: Sequence[Mapping[str, Any]],
@@ -1980,6 +2041,25 @@ def run_heldout_subject_finetuning_from_config(
             test_trial_predictions.to_csv(test_trial_predictions_path, index=False)
             _save_json(test_metrics_path, test_metrics)
 
+        trial_predictions_path = None
+        if bool(resolved_config["heldout_finetuning"]["export_trial_predictions"]):
+            if resolved_source_run.model_type != "gru":
+                raise ValueError("export_trial_predictions supports GRU source runs only.")
+            trial_table = _build_trial_probability_table(
+                params=params,
+                make_eval_network=make_eval_network,
+                bundle=bundle,
+            )
+            final_eval_likelihood = float(checkpoint_records[-1]["eval_likelihood"])
+            table_eval_likelihood = _trial_table_normalized_likelihood(trial_table, split="eval")
+            if not np.isclose(table_eval_likelihood, final_eval_likelihood, rtol=1e-4, atol=1e-6):
+                raise AssertionError(
+                    "Per-trial export does not reproduce the final checkpoint evaluation "
+                    f"likelihood: table={table_eval_likelihood}, checkpoint={final_eval_likelihood}."
+                )
+            trial_predictions_path = outputs_dir / "trial_predictions.csv.gz"
+            trial_table.to_csv(trial_predictions_path, index=False)
+
         # Per-held-out-subject / per-session eval likelihood decomposition (from the
         # final checkpoint). Tidy artifact + compact W&B table for downstream paired
         # statistics across data-scaling conditions. Add-only; never gates the run.
@@ -2075,6 +2155,9 @@ def run_heldout_subject_finetuning_from_config(
                 "test_metrics": (
                     str(test_metrics_path) if test_metrics_path is not None else None
                 ),
+                "trial_predictions": (
+                    str(trial_predictions_path) if trial_predictions_path is not None else None
+                ),
                 "optimization_trace": str(outputs_dir / "optimization_trace.json"),
                 "model_config": str(model_config_path),
                 "subject_index_map": subject_artifacts["subject_index_map"],
@@ -2136,6 +2219,9 @@ def run_heldout_subject_finetuning_from_config(
             ),
             "test_metrics_path": (
                 str(test_metrics_path) if test_metrics_path is not None else None
+            ),
+            "trial_predictions_path": (
+                str(trial_predictions_path) if trial_predictions_path is not None else None
             ),
             "params_path": str(outputs_dir / "params.json"),
             "subject_index_map_path": subject_artifacts["subject_index_map"],
