@@ -108,6 +108,14 @@ class TestReconcileSessionRoles(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"\['a'\]"):
             heldout_rescore.reconcile_session_roles(self.loader, roles, subjects=["a"], swap=False)
 
+    def test_mouse_without_matched_sessions_is_an_error(self):
+        # z has a role row but no loader session; c has neither.
+        for subjects in (["a", "z"], ["a", "c"]):
+            with self.assertRaisesRegex(ValueError, "or any session"):
+                heldout_rescore.reconcile_session_roles(
+                    self.loader, self.roles, subjects=subjects, swap=False
+                )
+
     def test_role_table_rejects_unknown_roles_and_duplicates(self):
         tmp = Path(tempfile.mkdtemp())
         try:
@@ -331,6 +339,51 @@ class TestHeldoutRescore(unittest.TestCase):
         self.assertEqual(manifest["checkpoint"]["step"], 20)
         self.assertEqual(manifest["checkpoint"]["session_curriculum_lambda"], 1.0)
 
+    def test_source_training_mice_are_rejected(self):
+        model_dir = self._source_run("include")
+        with self.assertRaisesRegex(ValueError, TRAIN_SUBJECTS[0]):
+            heldout_rescore.main(
+                [
+                    "--model-dir", str(model_dir),
+                    "--subjects", ",".join([HELDOUT_SUBJECTS[0], TRAIN_SUBJECTS[0]]),
+                    "--roles", str(self._alternation_roles("include")),
+                    "--output-dir", str(self.tmp / "rejected"),
+                ]
+            )
+
+    def test_trial_export_labels_within_session_prefix_suffix_split(self):
+        """A prefix/suffix target: only the suffix trials are eval, and the export check holds."""
+        model_dir = self._source_run("include")
+        subject = HELDOUT_SUBJECTS[0]
+        target_df = self.heldout_df[self.heldout_df["subject_id"] == subject]
+        session = sorted(target_df["ses_idx"].unique())[0]
+        target_df = target_df[target_df["ses_idx"] == session]
+        bundle = mice_loader._build_multisubject_bundle(
+            df=target_df,
+            resolved_subject_ids=[subject],
+            ignore_policy="include",
+            features=None,
+            eval_every_n=2,
+            batch_size=None,
+            batch_mode="single",
+            metadata={"ignore_policy": "include", "eval_every_n": 2},
+            trial_split_by_subject={
+                subject: {"session_id": session, "total_trials": N_TRIALS, "adapt_prefix_trials": 12}
+            },
+        )
+        bundle.metadata.update(
+            {"dataset_id": "prefix-suffix", "split_strategy": "within_session_prefix_suffix"}
+        )
+        config = _build_finetune_config(
+            yaml.safe_load((model_dir / "inputs.yaml").read_text()), model_dir
+        )
+        config["output"]["output_root"] = str(self.tmp / "prefix_suffix")
+        config["heldout_finetuning"]["export_trial_predictions"] = True
+        result = run_heldout_subject_finetuning_from_config(config, target_bundle=bundle)
+        trials = pd.read_csv(result["trial_predictions_path"])
+        self.assertEqual(sorted(trials.loc[trials["split"] == "eval", "trial"]), list(range(12, N_TRIALS)))
+        self.assertEqual(sorted(trials.loc[trials["split"] == "train", "trial"]), list(range(12)))
+
     def test_two_way_model_has_no_ignore_probability(self):
         model_dir = self._source_run("exclude")
         out, _ = self._rescore(model_dir, self._alternation_roles("exclude"))
@@ -356,6 +409,19 @@ class TestExplicitCheckpointStep(unittest.TestCase):
                 resolve_model_run(model_dir, checkpoint_policy="step_30")
             with self.assertRaises(ValueError):
                 resolve_model_run(model_dir, checkpoint_policy="step_x")
+            # An index record without params_path must not resolve to the final params.json.
+            index_path = model_dir / "outputs" / "checkpoints" / "index.json"
+            index = json.loads(index_path.read_text())
+            index["checkpoints"].append({"step": 40, "eval_likelihood": 0.1})
+            index_path.write_text(json.dumps(index))
+            with self.assertRaises(FileNotFoundError):
+                resolve_model_run(model_dir, checkpoint_policy="step_40")
+            # Baseline RL has no checkpoint steps: an explicit step is an error, not the final fit.
+            rl_dir = tmp / "baseline"
+            (rl_dir / "outputs").mkdir(parents=True)
+            (rl_dir / "inputs.yaml").write_text(yaml.safe_dump({"data": {}, "model": {"type": "baseline_rl"}}))
+            with self.assertRaisesRegex(ValueError, "no checkpoint steps"):
+                resolve_model_run(rl_dir, checkpoint_policy="step_30")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

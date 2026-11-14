@@ -32,6 +32,7 @@ from disentangled_rnns.library import rnn_utils
 from evaluation.target_transfer import (
     build_binary_trial_predictions,
     summarize_binary_trial_predictions,
+    target_test_mask,
 )
 from model_trainers.disrnn_trainer import DisrnnTrainer
 from model_trainers.gru_trainer import GruTrainer, _threeway_likelihood_decomposition
@@ -1570,7 +1571,7 @@ def _build_trial_probability_table(
 
     One row per modelled trial (under ``exclude`` the ignored trials are not in the
     model's sequence, so they have no row and ``p_ignore`` is NaN). ``split`` is
-    ``train`` for fine-tuned sessions and ``eval`` for scored sessions.
+    ``eval`` for scored trials (``target_test_mask``) and ``train`` otherwise.
     """
     ignore_policy = str(bundle.metadata.get("ignore_policy", "exclude"))
     xs_full = bundle.extras["dataset"].get_all()["xs"]
@@ -1584,9 +1585,9 @@ def _build_trial_probability_table(
         np.asarray(yhat_full)[:, :, :n_action_logits],
         ignore_policy=ignore_policy,
     )
-    train_ids = {str(value) for value in bundle.metadata.get("train_session_ids") or []}
-    eval_ids = {str(value) for value in bundle.metadata.get("eval_session_ids") or []}
-    session_ids = output_df["ses_idx"].astype(str)
+    # Same membership rule as the scored target-test table: eval sessions, or the test
+    # suffix of a within-session prefix/suffix split. Every other modelled trial is train.
+    eval_mask = target_test_mask(output_df, bundle.metadata)
     columns = ["subject_id", "ses_idx", "trial", "animal_response"]
     if "source_ses_idx" in output_df.columns:
         columns.insert(2, "source_ses_idx")
@@ -1598,11 +1599,7 @@ def _build_trial_probability_table(
         if n_action_logits >= 3
         else np.nan
     )
-    table["split"] = np.where(
-        session_ids.isin(eval_ids).to_numpy(),
-        "eval",
-        np.where(session_ids.isin(train_ids).to_numpy(), "train", "none"),
-    )
+    table["split"] = np.where(eval_mask, "eval", "train")
     return table
 
 

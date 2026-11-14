@@ -113,8 +113,6 @@ def reconcile_session_roles(
     incomplete: list[str] = []
     for subject in subjects:
         rows = used[used["subject_id"] == subject]
-        if rows.empty:
-            continue
         adapt = sorted(rows.loc[rows["role"] == tune_role, "session_id"])
         test = sorted(rows.loc[rows["role"] == score_role, "session_id"])
         if not adapt or not test:
@@ -123,8 +121,8 @@ def reconcile_session_roles(
         split[subject] = {"adapt_session_ids": adapt, "test_session_ids": test}
     if incomplete:
         raise ValueError(
-            "These mice lack a fine-tune or a scored session after reconciling the role "
-            f"table with the loader: {incomplete}."
+            "These mice lack a fine-tune or a scored session (or any session) after "
+            f"reconciling the role table with the loader: {incomplete}."
         )
 
     def _listing(frame: pd.DataFrame) -> dict[str, Any]:
@@ -158,6 +156,14 @@ def build_rescore_bundle(
     """Load the listed mice like the held-out fine-tune does, then apply the role table."""
     from data_loaders import mice as mice_loader
     from post_training_analysis import heldout_finetuning as hf
+    from utils.multisubject import load_subject_index_map
+
+    # Only mice new to the source run get a tuned embedding; a training mouse would keep its
+    # frozen embedding and be "scored" on data it was trained on.
+    source_subjects, _ = load_subject_index_map(source_run.subject_index_map_path)
+    seen = sorted({str(s) for s in heldout_selector.get("test_subject_ids") or []} & {str(s) for s in source_subjects})
+    if seen:
+        raise ValueError(f"These mice are in the source run's training set, not held out: {seen}.")
 
     source_data_cfg = dict(source_run.run_config.get("data") or {})
     ignore_policy = str(source_data_cfg.get("ignore_policy", "exclude"))

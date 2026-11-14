@@ -151,6 +151,11 @@ def resolve_model_run(
 
     baseline_output_path = None
     if model_type == "baseline_rl":
+        if _explicit_checkpoint_step(normalized_policy) is not None:
+            raise ValueError(
+                f"checkpoint_policy={checkpoint_policy!r}: baseline RL runs have no "
+                "checkpoint steps."
+            )
         baseline_output_path = outputs_dir / "baseline_rl_output.json"
         if not baseline_output_path.exists():
             raise FileNotFoundError(
@@ -4854,10 +4859,10 @@ def _resolve_checkpoint_artifact(
         candidate = _resolve_artifact_path(
             model_dir=model_dir,
             outputs_dir=outputs_dir,
+            # A record without a params_path must not resolve to the final params.json.
             reported_path=(
-                records[0].get("params_path")
-                if records
-                else f"outputs/checkpoints/step_{explicit_step}/params.json"
+                (records[0].get("params_path") if records else None)
+                or f"outputs/checkpoints/step_{explicit_step}/params.json"
             ),
         )
         if not candidate.exists():
