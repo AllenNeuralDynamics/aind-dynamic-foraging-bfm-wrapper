@@ -17,7 +17,10 @@ embeddings are tuned) and the same fine-tune settings, read from the source run'
 Outputs in ``--output-dir``: ``trial_predictions.csv.gz`` (p_left, p_right, p_ignore per
 trial; p_ignore is NaN for a 2-way model), ``session_scores.csv`` and ``mouse_scores.csv``
 (summed log-likelihoods and trial counts, left/right on engaged trials and full 3-way),
-``subject_embeddings.csv`` (the fine-tuned embedding per mouse) and ``manifest.json``.
+``subject_embeddings.csv`` (the fine-tuned embedding per mouse), the fine-tune's
+``subject_index_map.json`` and ``session_context_map.json`` (session-conditioned models
+only), and ``manifest.json``. ``extract_heldout_trial_states`` rebuilds the tuned model
+from these and the source run, and returns the held-out mice's per-trial GRU states.
 
 ``--session-lambda`` sets the session_curriculum_lambda used in BOTH the fine-tune and the
 scoring forward pass: ``checkpoint`` (default) uses the selected checkpoint's own lambda, so
@@ -39,6 +42,7 @@ import argparse
 import hashlib
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -48,6 +52,10 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 ROLES = ("fit", "score")
+MAP_FILES = {
+    "subject_index_map": "subject_index_map.json",
+    "session_context_map": "session_context_map.json",
+}
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -226,6 +234,163 @@ def checkpoint_lambda(model_dir: str | Path, step: int | None, *, final: bool = 
     return float(final_lambda) if final and final_lambda is not None else None
 
 
+def rescore_finetune_config(
+    model_dir: str | Path, subjects: Sequence[str], *, checkpoint: str | None = None
+) -> dict[str, Any]:
+    """The held-out fine-tune config for ``subjects``, read from the source run's
+    ``auto_heldout_finetune`` block; ``checkpoint`` overrides its checkpoint policy."""
+    import yaml
+
+    from resume_heldout_beaker import _build_finetune_config
+
+    source_cfg = yaml.safe_load((Path(model_dir) / "inputs.yaml").read_text())
+    config = _build_finetune_config(source_cfg, Path(model_dir))
+    if checkpoint is not None:
+        config["source_run"]["checkpoint_policy"] = checkpoint
+    config["heldout_subjects"]["test_subject_ids"] = list(subjects)
+    return config
+
+
+def extract_heldout_trial_states(
+    model_dir: str | Path,
+    rescore_dir: str | Path,
+    *,
+    roles: str | Path | None = None,
+    extra_cols_to_retain: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Per-trial GRU states of the held-out mice, rebuilt from a re-score's saved outputs.
+
+    ``model_dir`` is the SOURCE run (e.g. its hydrated ``gru-output`` artifact);
+    ``rescore_dir`` holds this tool's outputs (the ``heldout-rescore`` artifact):
+    ``manifest.json``, ``subject_embeddings.csv``, ``subject_index_map.json`` and, for a
+    session-conditioned model, ``session_context_map.json``. The fine-tune's own params are
+    not read: the tuned model is the manifest's source checkpoint (checked by sha256) with
+    the logged embeddings in the rows ``subject_index_map.json`` gives them. The held-out
+    data are rebuilt as for scoring (``build_rescore_bundle``, same roles file and pass),
+    and the rebuilt subject index and session context must equal the saved maps.
+    ``roles`` defaults to the manifest's path and must match its sha256.
+
+    Returns ``(trial_df, info)`` in the ``gru_trial_states`` layout (see its timing
+    convention) for every trial the model steps through, plus ``use``: ``tuned``,
+    ``scored`` or ``none`` (a session without a role: in the sequence, never tuned or
+    scored; ``trial_predictions.csv.gz`` leaves these out).
+    """
+    from post_training_analysis import heldout_finetuning as hf
+    from post_training_analysis import gru_trial_states as gts
+    from post_training_analysis.generative_analysis import resolve_model_run
+    from utils.multisubject import (
+        SUBJECT_TABLE_KEY,
+        expand_local_multisubject_params,
+        load_session_context_map,
+        load_subject_index_map,
+        resolve_subject_embedding_module_key,
+    )
+
+    if extra_cols_to_retain is None:
+        extra_cols_to_retain = gts.TASK_STATE_COLUMNS
+    model_dir = Path(model_dir).expanduser().resolve()
+    rescore_dir = Path(rescore_dir).expanduser()
+    manifest = json.loads((rescore_dir / "manifest.json").read_text())
+    checkpoint = manifest["checkpoint"]
+    roles_path = Path(roles or manifest["roles"]["path"]).expanduser()
+    if _sha256_bytes(roles_path.read_bytes()) != manifest["roles"]["sha256"]:
+        raise ValueError(f"Roles file {roles_path} is not the one the re-score used.")
+
+    source_run = resolve_model_run(model_dir, split="train", checkpoint_policy=checkpoint["label"])
+    if _sha256_bytes(Path(source_run.params_path).read_bytes()) != checkpoint["params_sha256"]:
+        raise ValueError(f"{source_run.params_path} is not the checkpoint the re-score tuned.")
+    subject_to_index, index_to_subject = load_subject_index_map(
+        rescore_dir / MAP_FILES["subject_index_map"]
+    )
+    _, source_index_to_subject = load_subject_index_map(source_run.subject_index_map_path)
+    n_source = len(source_index_to_subject)
+    if any(index_to_subject[i] != source_index_to_subject[i] for i in range(n_source)):
+        raise ValueError("The saved subject index map does not extend the source run's.")
+    heldout_subjects = [index_to_subject[i] for i in range(n_source, len(index_to_subject))]
+
+    config = rescore_finetune_config(model_dir, heldout_subjects, checkpoint=checkpoint["label"])
+    resolved = hf._resolve_runtime_config(config, source_run=source_run, output_root_override=None)
+    selector = dict(resolved["heldout_subjects"])
+    selector["cols_to_retain"] = list(
+        dict.fromkeys(
+            [*(selector.get("cols_to_retain") or gts._DEFAULT_COLS_TO_RETAIN), *extra_cols_to_retain]
+        )
+    )
+    target_bundle, _ = build_rescore_bundle(
+        source_run=source_run,
+        heldout_selector=selector,
+        fine_tune_cfg=resolved["heldout_finetuning"],
+        roles=read_role_table(roles_path),
+        swap=bool(manifest["swap"]),
+    )
+    architecture = dict(source_run.run_config["model"].get("architecture") or {})
+    bundle, _, appended_indices, rebuilt_subject_to_index, _ = hf._build_global_heldout_bundle(
+        source_run=source_run,
+        heldout_selector=selector,
+        fine_tune_cfg=resolved["heldout_finetuning"],
+        architecture=architecture,
+        target_bundle=target_bundle,
+    )
+    if {str(k): int(v) for k, v in rebuilt_subject_to_index.items()} != {
+        str(k): int(v) for k, v in subject_to_index.items()
+    }:
+        raise ValueError("The rebuilt subject index differs from the saved subject_index_map.json.")
+    context_path = rescore_dir / MAP_FILES["session_context_map"]
+    if context_path.exists():
+        rebuilt_context = json.loads(json.dumps(bundle.metadata["session_context"], default=str))
+        if rebuilt_context != load_session_context_map(context_path):
+            raise ValueError("The rebuilt session context differs from the saved session_context_map.json.")
+    elif str(architecture.get("session_encoding_type", "none")).lower() != "none":
+        raise FileNotFoundError(f"A session-conditioned model needs {context_path}.")
+
+    params = expand_local_multisubject_params(
+        hf._load_params(source_run.params_path), n_new_subjects=len(appended_indices)
+    )
+    module = resolve_subject_embedding_module_key(params)
+    embeddings = pd.read_csv(rescore_dir / "subject_embeddings.csv", dtype={"subject_id": str})
+    if sorted(embeddings["subject_id"]) != sorted(heldout_subjects):
+        raise ValueError("subject_embeddings.csv does not hold exactly the appended mice.")
+    table = np.array(params[module][SUBJECT_TABLE_KEY], dtype=float)
+    rows = [subject_to_index[subject] for subject in embeddings["subject_id"]]
+    table[rows] = embeddings[[c for c in embeddings.columns if c.startswith("emb_")]].to_numpy()
+    params[module][SUBJECT_TABLE_KEY] = table
+
+    session_lambda = float(checkpoint["finetune_session_curriculum_lambda"])
+    make_eval_network = hf._make_heldout_gru_network(
+        architecture=architecture,
+        model_config=source_run.model_config,
+        metadata=bundle.metadata,
+        session_lambda=session_lambda,
+    )
+    output_df, n_action_logits = hf._gru_output_dataframe(
+        params=params, make_eval_network=make_eval_network, bundle=bundle
+    )
+    split = hf._trial_probability_table_from_output(output_df, n_action_logits, bundle=bundle)["split"]
+    output_df["use"] = split.map({"train": "tuned", "eval": "scored", "none": "none"}).to_numpy()
+    trial_df = gts.build_trial_states_table(
+        output_df, metadata=bundle.metadata, extra_columns=[*extra_cols_to_retain, "use"]
+    )
+    scored = trial_df[trial_df["use"] == "scored"]
+    info = {
+        "model_dir": str(model_dir),
+        "rescore_dir": str(rescore_dir),
+        "pass": manifest["pass"],
+        "checkpoint_label": checkpoint["label"],
+        "params_path": source_run.params_path,
+        "session_lambda": session_lambda,
+        "n_actions": int(n_action_logits),
+        "n_trials": int(len(trial_df)),
+        "n_trials_by_use": {k: int(v) for k, v in trial_df["use"].value_counts().items()},
+        "n_sessions": int(trial_df["ses_idx"].nunique()),
+        "n_subjects": int(trial_df["subject_id"].nunique()),
+        "hidden_size": int(len(gts.state_columns(trial_df))),
+        "pooled_trial_likelihood_scored": gts.pooled_trial_likelihood(scored),
+        # The readout is not tuned, so the source checkpoint's readout applies.
+        "readout_max_abs_error": gts.readout_reconstruction_error(trial_df, source_run.params_path),
+    }
+    return trial_df, info
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -266,11 +431,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     logging.basicConfig(
         level=logging.INFO, format="[%(asctime)s][%(name)s][%(levelname)s] %(message)s"
     )
-    import yaml
-
     from post_training_analysis import heldout_finetuning as hf
     from post_training_analysis.generative_analysis import resolve_model_run
-    from resume_heldout_beaker import _build_finetune_config
     from utils.multisubject import extract_subject_embeddings_from_params, load_subject_index_map
     from utils.run_helpers import _code_versions
 
@@ -290,22 +452,18 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         )
     else:
         model_dir = Path(args.model_dir).expanduser().resolve()
-    source_cfg = yaml.safe_load((Path(model_dir) / "inputs.yaml").read_text())
 
     subjects = read_subject_list(args.subjects)
     roles_path = Path(args.roles).expanduser()
     roles = read_role_table(roles_path)
 
-    config = _build_finetune_config(source_cfg, Path(model_dir))
-    if args.checkpoint is not None:
-        config["source_run"]["checkpoint_policy"] = args.checkpoint
+    config = rescore_finetune_config(model_dir, subjects, checkpoint=args.checkpoint)
     if args.seed is not None:
         config["seed"] = args.seed
     if args.n_steps is not None:
         config["heldout_finetuning"]["n_steps"] = args.n_steps
     if args.lr is not None:
         config["heldout_finetuning"]["lr"] = args.lr
-    config["heldout_subjects"]["test_subject_ids"] = list(subjects)
     config["heldout_finetuning"]["export_trial_predictions"] = True
     config["output"]["output_root"] = str(output_dir / "finetune")
 
@@ -470,6 +628,15 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         session_scores.to_csv(outputs["session_scores"], index=False)
         mouse_scores.to_csv(outputs["mouse_scores"], index=False)
         embedding_table.to_csv(outputs["subject_embeddings"], index=False)
+        # The fine-tune's row order of the appended embeddings and its extended session
+        # context: with the source checkpoint they rebuild the tuned model
+        # (extract_heldout_trial_states). A model without session conditioning has no
+        # session context map.
+        finetune_outputs = Path(result["outputs_dir"])
+        for key in MAP_FILES:
+            if (finetune_outputs / MAP_FILES[key]).exists():
+                outputs[key] = output_dir / MAP_FILES[key]
+                shutil.copyfile(finetune_outputs / MAP_FILES[key], outputs[key])
         manifest["finetune"]["output_dir"] = result["output_dir"]
         manifest["outputs"] = {key: str(path) for key, path in outputs.items()}
         manifest_path = output_dir / "manifest.json"
