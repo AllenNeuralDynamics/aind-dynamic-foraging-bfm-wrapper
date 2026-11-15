@@ -66,7 +66,7 @@ in-repo `data_loaders.disrnn_dataset` builder (vendored from the retired
 | `post_training_analysis/gru_step.py` | `GruStep`: the trained multisubject GRU's update with the context as a free input (`step`, `logit_diff`, `jacobian`, `run`) plus `subject_context` (the network's own embedding + session-delta module), `find_fixed_points` (forward iteration + damped Newton) and `run_ablated` (mean-replacement ablation of a subspace at every step, global or per-input means; full or memory-only; per-input means assume 2-action inputs); parity-tested against Haiku |
 | `post_training_analysis/baseline_rl_trial_rollout.py` | `rollout_baseline_rl`: per-trial P(right) and Q of per-subject baseline-RL fits on any trial table; Q taken from the agent itself (exact; the shared recovery can be wrong for 2-learning-rate agents) |
 | `external_transfer/gru_transfer.py` | Source-GRU → external-dataset transfer cell (study 09); `python -m` entry point |
-| `post_training_analysis/heldout_rescore.py` | Re-score a finished GRU's held-out mice with an explicit `fit`/`score` session table and a swap (pass A/B); per-trial p(left/right/ignore), per-session/per-mouse log-likelihoods, per-mouse embedding, manifest; `python -m` entry point (**training-adjacent**, [§7](#7-training-adjacent-exceptions)) |
+| `post_training_analysis/heldout_rescore.py` | Re-score a finished GRU's held-out mice with an explicit `fit`/`score` session table and a swap (pass A/B); per-trial p(left/right/ignore), per-session/per-mouse log-likelihoods, per-mouse embedding, manifest, maps; `extract_heldout_trial_states` rebuilds held-out per-trial GRU states from those outputs; `python -m` entry point (**training-adjacent**, [§7](#7-training-adjacent-exceptions)) |
 | `post_training_analysis/*.ipynb` | Exploratory notebooks (`p_switch_*`, `simulate_sessions`) — see [§8](#8-known-gaps--backlog) |
 | `evaluation/heldout_eval_config.py` | `HeldoutEvalConfig` — config→eval bridge (shared by training & eval) |
 | `evaluation/common.py` | Model-agnostic helpers (logit→prob math, identifier/filename normalization, subject/session grouping, param loading) |
@@ -261,7 +261,16 @@ explicitly:
    checkpoint's own lambda (from `checkpoints/index.json` / `output_summary.json`), or 1 as in
    the auto held-out fine-tune (`heldout_finetuning.session_curriculum_lambda`, default 1.0,
    so studies 01/02 reproduce). The manifest and the per-trial table record the checkpoint's
-   lambda and the lambda used. W&B logging (optional) creates a new run.
+   lambda and the lambda used. W&B logging (optional) creates a new run; its
+   `heldout-rescore-<run>` artifact also holds the fine-tune's `subject_index_map.json` and
+   (session-conditioned models) `session_context_map.json`, and a byte copy of the roles input
+   (`roles.<ext>`) (wrapper #129).
+   `heldout_rescore.extract_heldout_trial_states(model_dir, rescore_dir)` rebuilds the tuned
+   model from the source checkpoint (sha256-checked) plus that artifact's embeddings and
+   maps, without the fine-tune's own params, rebuilds the held-out data as for scoring, and
+   returns the per-trial `gru_trial_states` table (plus `use` = tuned/scored/none) for the
+   held-out mice. It shares the fine-tune's network factory (`_make_heldout_gru_network`)
+   and forward pass (`_gru_output_dataframe`).
 2. **`likelihood_comparison._evaluate_disrnn_dataset`** — for the **multisubject
    disRNN** case only, it borrows the trainer's network-construction helpers
    (single-subject eval uses `evaluation.disrnn_evaluation`'s own builder).
@@ -332,6 +341,14 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change an evaluation feature.
+
+### 2026-11-14
+- **Held-out GRU states from the re-score artifact** (wrapper #129): the `heldout-rescore`
+  artifact adds `subject_index_map.json`, `session_context_map.json` and a copy of the roles input;
+  `heldout_rescore.extract_heldout_trial_states` rebuilds the fine-tuned model from the
+  source checkpoint and that artifact and returns per-trial held-out states. The held-out
+  fine-tune's GRU network and forward pass are split into helpers; its behaviour is
+  unchanged.
 
 ### 2026-11-13
 - **`post_training_analysis.heldout_rescore`** (wrapper #126): held-out re-scoring with an

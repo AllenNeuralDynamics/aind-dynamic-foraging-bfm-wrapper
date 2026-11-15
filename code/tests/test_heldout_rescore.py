@@ -23,7 +23,7 @@ try:
     from data_loaders import mice as mice_loader
     from disentangled_rnns.library import rnn_utils
     from models.gru_network import make_gru_network
-    from post_training_analysis import heldout_rescore
+    from post_training_analysis import gru_trial_states, heldout_rescore
     from post_training_analysis.generative_analysis import resolve_model_run
     from post_training_analysis.heldout_finetuning import (
         run_heldout_subject_finetuning_from_config,
@@ -282,8 +282,8 @@ class TestHeldoutRescore(unittest.TestCase):
         pd.DataFrame(rows, columns=["subject_id", "session_id", "role"]).to_csv(path, index=False)
         return path
 
-    def _rescore(self, model_dir: Path, roles: Path, *extra: str) -> tuple[Path, dict]:
-        out = self.tmp / f"rescore_{len(list(self.tmp.iterdir()))}"
+    def _rescore(self, model_dir: Path, roles: Path, *extra: str, out: Path | None = None) -> tuple[Path, dict]:
+        out = out or self.tmp / f"rescore_{len(list(self.tmp.iterdir()))}"
         with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
             manifest = heldout_rescore.main(
                 [
@@ -556,6 +556,90 @@ class TestHeldoutRescore(unittest.TestCase):
         self.assertTrue(trials["ll_3way"].isna().all())
         self.assertFalse((trials["response"] == 2).any())
         np.testing.assert_allclose(trials[["p_left", "p_right"]].sum(axis=1), 1.0, rtol=1e-5)
+
+    def test_artifact_holds_the_maps_that_rebuild_the_tuned_model(self):
+        model_dir = self._source_run("include", session_conditioning=True)
+        run = mock.MagicMock(id="rescore-run")
+        with mock.patch("utils.run_helpers._init_wandb_with_fallback", return_value=run), \
+                mock.patch("wandb.Artifact") as artifact, mock.patch("wandb.Table"):
+            out, manifest = self._rescore(
+                model_dir, self._alternation_roles("include"), "--wandb-project", "proj"
+            )
+        added = sorted(Path(c.args[0]).name for c in artifact.return_value.add_file.call_args_list)
+        self.assertEqual(
+            added,
+            sorted([
+                "trial_predictions.csv.gz", "session_scores.csv", "mouse_scores.csv",
+                "subject_embeddings.csv", "subject_index_map.json", "session_context_map.json",
+                "roles.csv", "manifest.json",
+            ]),
+        )
+        self.assertEqual((out / "roles.csv").read_bytes(), self._alternation_roles("include").read_bytes())
+        finetune_outputs = Path(manifest["finetune"]["output_dir"]) / "outputs"
+        for name in heldout_rescore.MAP_FILES.values():
+            self.assertEqual((out / name).read_bytes(), (finetune_outputs / name).read_bytes())
+
+    def test_rebuilt_model_reproduces_the_logged_predictions(self):
+        """Source checkpoint + logged embeddings + maps give the scoring run's p(choice)."""
+        for ignore_policy, session_conditioning in (("include", True), ("exclude", False)):
+            with self.subTest(ignore_policy=ignore_policy):
+                model_dir = self._source_run(ignore_policy, session_conditioning)
+                roles = self._alternation_roles(ignore_policy)
+                out, _ = self._rescore(model_dir, roles)
+                self.assertEqual(
+                    (out / "session_context_map.json").exists(), session_conditioning
+                )
+                # Only the saved outputs: the fine-tune folder (its params.json) and the
+                # original roles input are gone; the re-score's own roles copy remains.
+                shutil.rmtree(out / "finetune")
+                roles.unlink()
+                with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
+                    states, info = heldout_rescore.extract_heldout_trial_states(model_dir, out)
+                logged = pd.read_csv(out / "trial_predictions.csv.gz", dtype={"subject_id": str})
+                # ``session_id`` is the source session id in both tables.
+                merged = logged.merge(
+                    states,
+                    on=["subject_id", "session_id", "trial"],
+                    how="inner",
+                    validate="1:1",
+                )
+                self.assertEqual(len(merged), len(logged))
+                self.assertTrue((merged["use_x"] == merged["use_y"]).all())
+                n_actions = 3 if ignore_policy == "include" else 2
+                observed = merged[["p_left", "p_right", "p_ignore"][:n_actions]].to_numpy()
+                rebuilt = merged[list(gru_trial_states.PROBABILITY_COLUMNS[:n_actions])].to_numpy()
+                np.testing.assert_allclose(rebuilt, observed, atol=1e-6, rtol=0)
+                self.assertLess(info["readout_max_abs_error"], 1e-5)
+                self.assertEqual(info["hidden_size"], 5)
+
+                # The logged embeddings matter: shifting them changes the predictions.
+                embeddings = pd.read_csv(out / "subject_embeddings.csv", dtype={"subject_id": str})
+                embeddings[["emb_0", "emb_1"]] += 0.5
+                embeddings.to_csv(out / "subject_embeddings.csv", index=False)
+                with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
+                    shifted, _ = heldout_rescore.extract_heldout_trial_states(model_dir, out)
+                self.assertFalse(np.allclose(shifted["p_model1_left"], states["p_model1_left"], atol=1e-4))
+
+    def test_reused_output_dir_drops_an_earlier_session_map(self):
+        out = self.tmp / "reused"
+        self._rescore(self._source_run("include", True), self._alternation_roles("include"), out=out)
+        self.assertTrue((out / "session_context_map.json").exists())
+        model_dir = self._source_run("exclude", False)
+        _, manifest = self._rescore(model_dir, self._alternation_roles("exclude"), out=out)
+        self.assertFalse((out / "session_context_map.json").exists())
+        self.assertNotIn("session_context_map", manifest["outputs"])
+        with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
+            states, _ = heldout_rescore.extract_heldout_trial_states(model_dir, out)
+        self.assertGreater(len(states), 0)
+
+    def test_rebuild_refuses_a_different_roles_file(self):
+        model_dir = self._source_run("include")
+        roles = self._alternation_roles("include")
+        out, _ = self._rescore(model_dir, roles)
+        edited = self.tmp / "roles_other.csv"
+        edited.write_text(roles.read_text().replace(",fit", ",score", 1))
+        with self.assertRaisesRegex(ValueError, "not the one the re-score used"):
+            heldout_rescore.extract_heldout_trial_states(model_dir, out, roles=edited)
 
 
 @unittest.skipUnless(DEPS_AVAILABLE, f"dependencies unavailable: {IMPORT_ERROR}")
