@@ -1094,6 +1094,56 @@ def _make_gru_runtime(
     return trainer, architecture, training_cfg, copy.deepcopy(source_run.model_config), source_model_cfg
 
 
+def _make_heldout_gru_network(
+    *,
+    architecture: Mapping[str, Any],
+    model_config: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+    session_lambda: float,
+) -> Any:
+    """The held-out GRU network factory (train and eval alike) for the extended subject table."""
+    ignore_policy = str(metadata.get("ignore_policy", "exclude"))
+    output_size = int(
+        _normalize_mapping(model_config).get(
+            "output_size",
+            2 if ignore_policy == "exclude" else 3,
+        )
+    )
+    session_cfg = resolve_session_conditioning_from_architecture(
+        architecture=architecture,
+        metadata=metadata,
+        multisubject=True,
+        max_n_subjects=int(metadata["num_subjects"]),
+        subject_embedding_size=int(architecture["subject_embedding_size"]),
+        context="Held-out fine-tuning GRU",
+    )
+    gru_make_network = make_gru_network(
+        hidden_size=int(architecture["hidden_size"]),
+        output_size=output_size,
+        multisubject=True,
+        max_n_subjects=int(metadata["num_subjects"]),
+        subject_embedding_size=int(architecture["subject_embedding_size"]),
+        subject_embedding_init=str(architecture.get("subject_embedding_init", "zeros")),
+        session_encoding_type=str(session_cfg["session_encoding_type"]),
+        session_integration_type=str(session_cfg["session_integration_type"]),
+        session_fourier_k=int(session_cfg["session_fourier_k"]),
+        session_delta_n_layers=int(session_cfg["session_delta_n_layers"]),
+        session_delta_hidden_size=int(session_cfg["session_delta_hidden_size"]),
+        session_max_index_by_subject_index=list(
+            metadata.get("session_max_index_by_subject_index") or []
+        ),
+    )
+    if session_lambda == 1.0:
+        return gru_make_network
+
+    # The trainer passes its own runtime lambda (1.0 without a schedule), so
+    # bind the requested one for training and evaluation alike.
+    def _gru_at_session_lambda(*_runtime_lambda: Any) -> Any:
+        return gru_make_network(session_lambda)
+
+    return _gru_at_session_lambda
+
+
 def _make_disrnn_runtime(
     *,
     source_run: Any,
@@ -1582,6 +1632,20 @@ def _build_trial_probability_table(
     model's sequence, so they have no row and ``p_ignore`` is NaN). ``split`` is
     ``eval`` for scored trials (``target_test_mask``) and ``train`` otherwise.
     """
+    output_df, n_action_logits = _gru_output_dataframe(
+        params=params, make_eval_network=make_eval_network, bundle=bundle
+    )
+    return _trial_probability_table_from_output(output_df, n_action_logits, bundle=bundle)
+
+
+def _gru_output_dataframe(
+    *,
+    params: Any,
+    make_eval_network: Any,
+    bundle: DatasetBundle,
+) -> tuple[pd.DataFrame, int]:
+    """One GRU forward pass over the full held-out sequence, as ``add_gru_model_results`` rows
+    (``latent_*`` states, ``choice_logit_*``, ``choice_prob_*``) and the number of logits."""
     ignore_policy = str(bundle.metadata.get("ignore_policy", "exclude"))
     xs_full = bundle.extras["dataset"].get_all()["xs"]
     yhat_full, network_states_full = rnn_utils.eval_network(make_eval_network, params, xs_full)
@@ -1594,6 +1658,16 @@ def _build_trial_probability_table(
         np.asarray(yhat_full)[:, :, :n_action_logits],
         ignore_policy=ignore_policy,
     )
+    return output_df, n_action_logits
+
+
+def _trial_probability_table_from_output(
+    output_df: pd.DataFrame,
+    n_action_logits: int,
+    *,
+    bundle: DatasetBundle,
+) -> pd.DataFrame:
+    """The ``_build_trial_probability_table`` rows for one ``_gru_output_dataframe`` result."""
     # Scored (eval) membership uses the target-test rule: eval sessions, or the test suffix
     # of a within-session prefix/suffix split. Train = sessions the fine-tune actually used
     # (none at K=0, where the optimisation is skipped). Anything else is "none".
@@ -1886,50 +1960,14 @@ def run_heldout_subject_finetuning_from_config(
 
         ignore_policy = str(bundle.metadata.get("ignore_policy", "exclude"))
         if resolved_source_run.model_type == "gru":
-            output_size = int(
-                _normalize_mapping(model_config).get(
-                    "output_size",
-                    2 if ignore_policy == "exclude" else 3,
-                )
-            )
-            session_cfg = resolve_session_conditioning_from_architecture(
+            make_train_network = make_eval_network = _make_heldout_gru_network(
                 architecture=architecture,
+                model_config=model_config,
                 metadata=bundle.metadata,
-                multisubject=True,
-                max_n_subjects=int(bundle.metadata["num_subjects"]),
-                subject_embedding_size=int(architecture["subject_embedding_size"]),
-                context="Held-out fine-tuning GRU",
-            )
-            gru_make_network = make_gru_network(
-                hidden_size=int(architecture["hidden_size"]),
-                output_size=output_size,
-                multisubject=True,
-                max_n_subjects=int(bundle.metadata["num_subjects"]),
-                subject_embedding_size=int(architecture["subject_embedding_size"]),
-                subject_embedding_init=str(architecture.get("subject_embedding_init", "zeros")),
-                session_encoding_type=str(session_cfg["session_encoding_type"]),
-                session_integration_type=str(session_cfg["session_integration_type"]),
-                session_fourier_k=int(session_cfg["session_fourier_k"]),
-                session_delta_n_layers=int(session_cfg["session_delta_n_layers"]),
-                session_delta_hidden_size=int(session_cfg["session_delta_hidden_size"]),
-                session_max_index_by_subject_index=list(
-                    bundle.metadata.get("session_max_index_by_subject_index") or []
+                session_lambda=float(
+                    resolved_config["heldout_finetuning"]["session_curriculum_lambda"]
                 ),
             )
-            session_lambda = float(
-                resolved_config["heldout_finetuning"]["session_curriculum_lambda"]
-            )
-            if session_lambda == 1.0:
-                make_train_network = gru_make_network
-                make_eval_network = gru_make_network
-            else:
-                # The trainer passes its own runtime lambda (1.0 without a schedule), so
-                # bind the requested one for training and evaluation alike.
-                def _gru_at_session_lambda(*_runtime_lambda: Any) -> Any:
-                    return gru_make_network(session_lambda)
-
-                make_train_network = _gru_at_session_lambda
-                make_eval_network = _gru_at_session_lambda
             runtime_model_config = model_config
         else:
             if float(resolved_config["heldout_finetuning"]["session_curriculum_lambda"]) != 1.0:
