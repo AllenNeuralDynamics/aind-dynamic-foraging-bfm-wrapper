@@ -263,7 +263,8 @@ explicitly:
    so studies 01/02 reproduce). The manifest and the per-trial table record the checkpoint's
    lambda and the lambda used. W&B logging (optional) creates a new run; its
    `heldout-rescore-<run>` artifact also holds the fine-tune's `subject_index_map.json` and
-   (session-conditioned models) `session_context_map.json` (wrapper #129).
+   (session-conditioned models) `session_context_map.json`, and a byte copy of the roles input
+   (`roles.<ext>`) (wrapper #129).
    `heldout_rescore.extract_heldout_trial_states(model_dir, rescore_dir)` rebuilds the tuned
    model from the source checkpoint (sha256-checked) plus that artifact's embeddings and
    maps, without the fine-tune's own params, rebuilds the held-out data as for scoring, and
@@ -343,7 +344,7 @@ python -m unittest tests.test_post_training_analysis tests.test_likelihood_compa
 
 ### 2026-11-14
 - **Held-out GRU states from the re-score artifact** (wrapper #129): the `heldout-rescore`
-  artifact adds `subject_index_map.json` and `session_context_map.json`;
+  artifact adds `subject_index_map.json`, `session_context_map.json` and a copy of the roles input;
   `heldout_rescore.extract_heldout_trial_states` rebuilds the fine-tuned model from the
   source checkpoint and that artifact and returns per-trial held-out states. The held-out
   fine-tune's GRU network and forward pass are split into helpers; its behaviour is

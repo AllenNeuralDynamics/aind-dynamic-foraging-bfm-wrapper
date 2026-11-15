@@ -282,8 +282,8 @@ class TestHeldoutRescore(unittest.TestCase):
         pd.DataFrame(rows, columns=["subject_id", "session_id", "role"]).to_csv(path, index=False)
         return path
 
-    def _rescore(self, model_dir: Path, roles: Path, *extra: str) -> tuple[Path, dict]:
-        out = self.tmp / f"rescore_{len(list(self.tmp.iterdir()))}"
+    def _rescore(self, model_dir: Path, roles: Path, *extra: str, out: Path | None = None) -> tuple[Path, dict]:
+        out = out or self.tmp / f"rescore_{len(list(self.tmp.iterdir()))}"
         with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
             manifest = heldout_rescore.main(
                 [
@@ -571,9 +571,10 @@ class TestHeldoutRescore(unittest.TestCase):
             sorted([
                 "trial_predictions.csv.gz", "session_scores.csv", "mouse_scores.csv",
                 "subject_embeddings.csv", "subject_index_map.json", "session_context_map.json",
-                "manifest.json",
+                "roles.csv", "manifest.json",
             ]),
         )
+        self.assertEqual((out / "roles.csv").read_bytes(), self._alternation_roles("include").read_bytes())
         finetune_outputs = Path(manifest["finetune"]["output_dir"]) / "outputs"
         for name in heldout_rescore.MAP_FILES.values():
             self.assertEqual((out / name).read_bytes(), (finetune_outputs / name).read_bytes())
@@ -583,12 +584,15 @@ class TestHeldoutRescore(unittest.TestCase):
         for ignore_policy, session_conditioning in (("include", True), ("exclude", False)):
             with self.subTest(ignore_policy=ignore_policy):
                 model_dir = self._source_run(ignore_policy, session_conditioning)
-                out, _ = self._rescore(model_dir, self._alternation_roles(ignore_policy))
+                roles = self._alternation_roles(ignore_policy)
+                out, _ = self._rescore(model_dir, roles)
                 self.assertEqual(
                     (out / "session_context_map.json").exists(), session_conditioning
                 )
-                # Only the saved outputs: the fine-tune folder (its params.json) is gone.
+                # Only the saved outputs: the fine-tune folder (its params.json) and the
+                # original roles input are gone; the re-score's own roles copy remains.
                 shutil.rmtree(out / "finetune")
+                roles.unlink()
                 with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
                     states, info = heldout_rescore.extract_heldout_trial_states(model_dir, out)
                 logged = pd.read_csv(out / "trial_predictions.csv.gz", dtype={"subject_id": str})
@@ -615,6 +619,18 @@ class TestHeldoutRescore(unittest.TestCase):
                 with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
                     shifted, _ = heldout_rescore.extract_heldout_trial_states(model_dir, out)
                 self.assertFalse(np.allclose(shifted["p_model1_left"], states["p_model1_left"], atol=1e-4))
+
+    def test_reused_output_dir_drops_an_earlier_session_map(self):
+        out = self.tmp / "reused"
+        self._rescore(self._source_run("include", True), self._alternation_roles("include"), out=out)
+        self.assertTrue((out / "session_context_map.json").exists())
+        model_dir = self._source_run("exclude", False)
+        _, manifest = self._rescore(model_dir, self._alternation_roles("exclude"), out=out)
+        self.assertFalse((out / "session_context_map.json").exists())
+        self.assertNotIn("session_context_map", manifest["outputs"])
+        with mock.patch(LOAD_PATCH, return_value=(self.heldout_df.copy(), list(HELDOUT_SUBJECTS))):
+            states, _ = heldout_rescore.extract_heldout_trial_states(model_dir, out)
+        self.assertGreater(len(states), 0)
 
     def test_rebuild_refuses_a_different_roles_file(self):
         model_dir = self._source_run("include")

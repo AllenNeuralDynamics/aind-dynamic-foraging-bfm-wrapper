@@ -19,7 +19,7 @@ trial; p_ignore is NaN for a 2-way model), ``session_scores.csv`` and ``mouse_sc
 (summed log-likelihoods and trial counts, left/right on engaged trials and full 3-way),
 ``subject_embeddings.csv`` (the fine-tuned embedding per mouse), the fine-tune's
 ``subject_index_map.json`` and ``session_context_map.json`` (session-conditioned models
-only), and ``manifest.json``. ``extract_heldout_trial_states`` rebuilds the tuned model
+only), a byte copy of the roles input (``roles.<ext>``), and ``manifest.json``. ``extract_heldout_trial_states`` rebuilds the tuned model
 from these and the source run, and returns the held-out mice's per-trial GRU states.
 
 ``--session-lambda`` sets the session_curriculum_lambda used in BOTH the fine-tune and the
@@ -52,6 +52,11 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 ROLES = ("fit", "score")
+def roles_copy_name(roles_path: str | Path) -> str:
+    """File name of the re-score's copy of its roles input: ``roles`` + the input's suffix."""
+    return "roles" + Path(roles_path).suffix
+
+
 MAP_FILES = {
     "subject_index_map": "subject_index_map.json",
     "session_context_map": "session_context_map.json",
@@ -268,7 +273,8 @@ def extract_heldout_trial_states(
     the logged embeddings in the rows ``subject_index_map.json`` gives them. The held-out
     data are rebuilt as for scoring (``build_rescore_bundle``, same roles file and pass),
     and the rebuilt subject index and session context must equal the saved maps.
-    ``roles`` defaults to the manifest's path and must match its sha256.
+    ``roles`` defaults to the re-score's own copy of the roles file (``roles.<ext>`` in
+    ``rescore_dir``), else the manifest's path; either way it must match the manifest's sha256.
 
     Returns ``(trial_df, info)`` in the ``gru_trial_states`` layout (see its timing
     convention) for every trial the model steps through, plus ``use``: ``tuned``,
@@ -292,7 +298,10 @@ def extract_heldout_trial_states(
     rescore_dir = Path(rescore_dir).expanduser()
     manifest = json.loads((rescore_dir / "manifest.json").read_text())
     checkpoint = manifest["checkpoint"]
-    roles_path = Path(roles or manifest["roles"]["path"]).expanduser()
+    if roles is None:
+        local_copy = rescore_dir / roles_copy_name(manifest["roles"]["path"])
+        roles = local_copy if local_copy.exists() else manifest["roles"]["path"]
+    roles_path = Path(roles).expanduser()
     if _sha256_bytes(roles_path.read_bytes()) != manifest["roles"]["sha256"]:
         raise ValueError(f"Roles file {roles_path} is not the one the re-score used.")
 
@@ -637,6 +646,13 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             if (finetune_outputs / MAP_FILES[key]).exists():
                 outputs[key] = output_dir / MAP_FILES[key]
                 shutil.copyfile(finetune_outputs / MAP_FILES[key], outputs[key])
+            else:
+                # A reused --output-dir must not keep an earlier run's map.
+                (output_dir / MAP_FILES[key]).unlink(missing_ok=True)
+        # The roles input too, byte for byte, so the artifacts alone rebuild the held-out data.
+        outputs["roles"] = output_dir / roles_copy_name(roles_path)
+        if roles_path.resolve() != outputs["roles"].resolve():
+            shutil.copyfile(roles_path, outputs["roles"])
         manifest["finetune"]["output_dir"] = result["output_dir"]
         manifest["outputs"] = {key: str(path) for key, path in outputs.items()}
         manifest_path = output_dir / "manifest.json"
