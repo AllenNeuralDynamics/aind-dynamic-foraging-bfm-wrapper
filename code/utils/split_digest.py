@@ -124,9 +124,9 @@ def log_split_digests(wandb_run: Any, digests: Mapping[str, Mapping[str, Any]]) 
     """Write ``split/<role>/<key>`` summary values to a W&B run (nothing without a run)."""
     if wandb_run is None:
         return
-    for role, values in digests.items():
-        for key, value in values.items():
-            wandb_run.summary[f"split/{role}/{key}"] = value
+    wandb_run.summary.update(
+        {f"split/{role}/{key}": value for role, values in digests.items() for key, value in values.items()}
+    )
 
 
 def record_split_digests(
@@ -139,10 +139,13 @@ def record_split_digests(
     """
     try:
         digests = compute()
+        log_split_digests(wandb_run, digests)
     except Exception as exc:  # noqa: BLE001 - provenance must not stop training
-        logger.warning("split digest not computed: %s", exc)
-        if wandb_run is not None:
-            wandb_run.summary["split/error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("split digest not recorded: %s", exc)
+        try:
+            if wandb_run is not None:
+                wandb_run.summary.update({"split/error": f"{type(exc).__name__}: {exc}"})
+        except Exception:  # noqa: BLE001
+            pass
         return None
-    log_split_digests(wandb_run, digests)
     return digests
