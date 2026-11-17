@@ -782,6 +782,12 @@ class TestHeldoutSubjectFinetuning(unittest.TestCase):
         self.assertEqual(fake_run.name, "training-run")
         self.assertFalse(fake_run.finished)
         self.assertNotIn("output_dir", fake_run.summary)
+        # split digests of the held-out cohort's adapt / scored sessions (wrapper #131)
+        self.assertNotIn("split/error", fake_run.summary)
+        for role in ("heldout_context", "heldout_eval"):
+            self.assertRegex(fake_run.summary[f"split/{role}/sessions_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(fake_run.summary[f"split/{role}/n_subjects"],
+                             len(self.heldout_subject_ids))
 
     def test_injected_run_defaults_preserve_checkpoint_namespace(self):
         # Test B: defaults (no prefix/offset) reproduce the legacy `checkpoint/*`

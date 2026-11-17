@@ -29,6 +29,7 @@ from utils.gru_evaluation import (
     load_gru_heldout_subject_data,
 )
 from utils.run_helpers import resolve_heldout_test_likelihood
+from utils.split_digest import bundle_split_digests, heldout_eval_digests, record_split_digests
 from post_training_analysis.heldout_finetuning import (
     run_heldout_subject_finetuning_from_config,
 )
@@ -202,6 +203,7 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
         heldout_loader = instantiate(hydra_config.data, **heldout_loader_kwargs)
         heldout_bundle = heldout_loader.load()
         logger.info("Loaded held-out dataset bundle with metadata: %s", heldout_bundle.metadata)
+        record_split_digests(wandb_run, lambda: bundle_split_digests(heldout_bundle, heldout=True))
 
         if wandb_run is not None and bool(heldout_bundle.metadata.get("multisubject", False)):
             current_name = wandb_run.name or ""
@@ -318,11 +320,13 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
     # two are filtered independently and the comparison against the RNN models is void.
     # The GLM-HMM also takes the held-out loader's train/eval session split from its metadata,
     # so it conditions on and scores exactly the sessions the GRU fine-tune does.
+    runner_heldout_bundle = None
     if model_type in {"hb", "glmhmm"} and heldout_cfg.enabled:
         heldout_loader = instantiate(
             hydra_config.data, **_baseline_rl_heldout_loader_kwargs(data_cfg)
         )
         hb_heldout_bundle = heldout_loader.load()
+        runner_heldout_bundle = hb_heldout_bundle
         dataset_bundle.extras["heldout_raw"] = hb_heldout_bundle.raw
         dataset_bundle.extras["heldout_metadata"] = hb_heldout_bundle.metadata
         logger.info(
@@ -336,10 +340,30 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
         hydra_config.model,
         heldout_data=heldout_test_data,
     )
+    # Split digests (wrapper #131): one identity for the data each role used. HB-family
+    # trainers fit on more than the bundle's train split and log what they used themselves.
+    logs_own_split = bool(getattr(model_trainer, "logs_own_split_digests", False))
+    # a missing ignore_policy means what the trainer reads it as: GLM-HMM fits ignores
+    default_policy = "include" if model_type == "glmhmm" else "exclude"
+    if not logs_own_split:
+        digests = record_split_digests(wandb_run, lambda: bundle_split_digests(
+            dataset_bundle, default_ignore_policy=default_policy
+        ))
+        if digests is not None:
+            dataset_bundle.metadata["split_digests"] = dict(digests)
+        if runner_heldout_bundle is not None:
+            record_split_digests(wandb_run, lambda: bundle_split_digests(
+                runner_heldout_bundle, heldout=True, default_ignore_policy=default_policy
+            ))
     loggers = {"wandb": wandb_run} if wandb_run is not None else None
     output = model_trainer.fit(dataset_bundle, loggers=loggers)
     if heldout_test_data is None:
         heldout_test_data = getattr(model_trainer, "heldout_data", None)
+    # single-subject held-out evaluation scores every session of the held-out subjects
+    if not logs_own_split and isinstance(heldout_test_data, dict) and "df_test" in heldout_test_data:
+        record_split_digests(wandb_run, lambda: heldout_eval_digests(
+            heldout_test_data, ignore_policy=str(heldout_cfg.ignore_policy)
+        ))
 
     checkpoint_heldout_summaries = []
     if isinstance(output, dict):
@@ -369,6 +393,9 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
                 )
             heldout_loader = instantiate(hydra_config.data, **heldout_loader_kwargs)
             heldout_bundle = heldout_loader.load()
+            record_split_digests(
+                wandb_run, lambda: bundle_split_digests(heldout_bundle, heldout=True)
+            )
             heldout_summary = model_trainer.fit_heldout(heldout_bundle, loggers=loggers)
         except Exception as exc:
             logger.warning("Held-out re-fit failed and will be skipped: %s", exc)

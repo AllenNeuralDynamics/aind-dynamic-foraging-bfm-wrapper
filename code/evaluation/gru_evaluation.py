@@ -26,6 +26,7 @@ from evaluation.common import (
 # load_disrnn_heldout_subject_data builds a disRNN-format dataset that GRU eval reuses;
 # it is the one appropriately model-specific helper still sourced from disrnn_evaluation.
 from evaluation.disrnn_evaluation import load_disrnn_heldout_subject_data
+from utils.split_digest import heldout_eval_digests, record_split_digests
 from evaluation.plotting import (
     plot_latents_in_space,
     plot_latents_over_trials,
@@ -498,6 +499,11 @@ def evaluate_gru_on_heldout_subjects(
 
     if heldout_data is None:
         heldout_data = load_gru_heldout_subject_data(hydra_config)
+        # loaded here, after the runner's digest point: record what is scored (wrapper #131)
+        # provenance goes to the run even when metric logging is off (the runner passes False)
+        record_split_digests(wandb_run, lambda: heldout_eval_digests(
+            heldout_data, ignore_policy=str(heldout_cfg.ignore_policy)
+        ))
 
     df_test = heldout_data["df_test"]
     test_subject_ids = heldout_data["test_subject_ids"]

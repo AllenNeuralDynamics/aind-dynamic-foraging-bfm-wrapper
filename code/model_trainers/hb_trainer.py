@@ -31,6 +31,7 @@ import pandas as pd
 
 from base.interfaces import ModelTrainer
 from utils.multisubject import compute_train_eval_session_ids
+from utils.split_digest import record_split_digests, split_digests
 from base.types import DatasetBundle
 
 logger = logging.getLogger(__name__)
@@ -406,6 +407,11 @@ def _normalized_likelihood(total_log_lik: float, total_trials: int) -> float:
 class HBTrainer(ModelTrainer):
     """Fit a hierarchical Bayesian cognitive model and score held-out subjects."""
 
+    # The population fit uses every session of bundle.raw, and held-out subjects are split
+    # with this trainer's own eval_every_n, so it logs the split digests of what it used
+    # (wrapper #131) instead of the runner logging the bundle's split.
+    logs_own_split_digests = True
+
     def __init__(
         self,
         estimator: str = "one_stage",
@@ -609,7 +615,11 @@ class HBTrainer(ModelTrainer):
         if bundle.raw is None or len(bundle.raw) == 0:
             raise ValueError("HBTrainer requires bundle.raw with trial-level rows.")
 
-        choices, rewards, _ = _extract_subject_sessions(bundle.raw)
+        choices, rewards, fit_session_ids = _extract_subject_sessions(bundle.raw)
+        record_split_digests(wandb_run, lambda: split_digests(
+            bundle.raw, {"train": [s for ids in fit_session_ids.values() for s in ids]},
+            ignore_policy="exclude",
+        ))
         choice_arr, reward_arr, valid_mask, session_mask, subject_ids = _pad_cohort(
             choices, rewards
         )
@@ -744,6 +754,8 @@ class HBTrainer(ModelTrainer):
         matched_log_lik, matched_trials = 0.0, 0
         per_subject_matched: Dict[str, Any] = {}
         matched_subjects, context_indices, score_indices = [], [], []
+        matched_context_ids: List[Any] = []
+        matched_score_ids: List[Any] = []
         for subject, ids in heldout_session_ids.items():
             if len(ids) < 2:
                 continue
@@ -752,6 +764,12 @@ class HBTrainer(ModelTrainer):
             matched_subjects.append(subject)
             context_indices.append([index_of[sid] for sid in train_ids])
             score_indices.append([index_of[sid] for sid in eval_ids])
+            matched_context_ids.extend(train_ids)
+            matched_score_ids.extend(eval_ids)
+        record_split_digests(wandb_run, lambda: split_digests(
+            heldout_df, {"heldout_context": matched_context_ids, "heldout_eval": matched_score_ids},
+            ignore_policy="exclude",
+        ))
 
         key_fit, key_draw, rng_key = jax.random.split(rng_key, 3)
         context_c, context_r, ctx_session_mask, ctx_valid = _pad_context(
@@ -883,6 +901,12 @@ class HBTrainer(ModelTrainer):
             subjects.append(subject)
             context_indices.append([index_of[sid] for sid in train_ids])
             score_indices.append([index_of[sid] for sid in eval_ids])
+        record_split_digests(wandb_run, lambda: split_digests(
+            heldout_df,
+            {"heldout_context": [s for v in split.values() for s in v["context"]],
+             "heldout_eval": [s for v in split.values() for s in v["eval"]]},
+            ignore_policy="exclude",
+        ))
 
         # Fold the subject set into the key: runs that each fit a different subset of subjects
         # (data.test_subject_ids) then draw from independent streams even under one seed, so

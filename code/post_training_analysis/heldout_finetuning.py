@@ -50,6 +50,7 @@ from utils.multisubject import (
     load_subject_index_map,
 )
 from utils.session_regularized_training import train_network_with_session_regularization
+from utils.split_digest import bundle_split_digests, record_split_digests
 
 logger = logging.getLogger(__name__)
 
@@ -1940,6 +1941,8 @@ def run_heldout_subject_finetuning_from_config(
             architecture=architecture,
             target_bundle=target_bundle,
         )
+        # the adapt / scored sessions of the held-out cohort, after any adapt-session cap
+        record_split_digests(wandb_run, lambda: bundle_split_digests(bundle, heldout=True))
         if wandb_run is not None and not external_wandb_run:
             _update_wandb_run_name_for_heldout_subjects(
                 wandb_run=wandb_run,

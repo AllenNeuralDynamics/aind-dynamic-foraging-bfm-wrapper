@@ -35,6 +35,7 @@ from utils.baseline_rl_evaluation import (
 
 from base.interfaces import ModelTrainer
 from base.types import DatasetBundle
+from utils.split_digest import bundle_split_digests, record_split_digests
 from evaluation.target_transfer import (
     build_binary_trial_predictions,
     summarize_binary_trial_predictions,
@@ -1993,6 +1994,13 @@ class BaselineRLTrainer(ModelTrainer):
                 wandb_run=wandb_run,
                 start_time=start_time,
             )
+            # _fit_multisubject resolves the split (an every-n fallback when the metadata has
+            # none) and writes it back to ``metadata``: digest what was fitted (wrapper #131)
+            digests = record_split_digests(wandb_run, lambda: bundle_split_digests(
+                DatasetBundle(raw=bundle.raw, train_set=None, eval_set=None, metadata=metadata)
+            ))
+            if digests is not None:
+                bundle.metadata["split_digests"] = dict(digests)
         else:
             output = self._fit_single_subject(
                 bundle=bundle,
@@ -2052,6 +2060,11 @@ class BaselineRLTrainer(ModelTrainer):
                     wandb_run=proxy,
                     start_time=start_time,
                 )
+                # the resolved held-out split, under split/heldout_* (not the heldout/ proxy)
+                record_split_digests(wandb_run, lambda: bundle_split_digests(
+                    DatasetBundle(raw=bundle.raw, train_set=None, eval_set=None, metadata=metadata),
+                    heldout=True,
+                ))
             else:
                 summary = self._fit_single_subject(
                     bundle=bundle,
