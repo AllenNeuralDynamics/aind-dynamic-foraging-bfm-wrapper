@@ -29,7 +29,7 @@ from utils.gru_evaluation import (
     load_gru_heldout_subject_data,
 )
 from utils.run_helpers import resolve_heldout_test_likelihood
-from utils.split_digest import bundle_split_digests, record_split_digests, split_digests
+from utils.split_digest import bundle_split_digests, heldout_eval_digests, record_split_digests
 from post_training_analysis.heldout_finetuning import (
     run_heldout_subject_finetuning_from_config,
 )
@@ -357,10 +357,8 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
         heldout_test_data = getattr(model_trainer, "heldout_data", None)
     # single-subject held-out evaluation scores every session of the held-out subjects
     if not logs_own_split and isinstance(heldout_test_data, dict) and "df_test" in heldout_test_data:
-        df_test = heldout_test_data["df_test"]
-        record_split_digests(wandb_run, lambda: split_digests(
-            df_test, {"heldout_eval": df_test["ses_idx"].unique()},
-            ignore_policy=str(heldout_cfg.ignore_policy),
+        record_split_digests(wandb_run, lambda: heldout_eval_digests(
+            heldout_test_data, ignore_policy=str(heldout_cfg.ignore_policy)
         ))
 
     checkpoint_heldout_summaries = []

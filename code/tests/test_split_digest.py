@@ -138,6 +138,16 @@ class BundleAndLoggingTest(unittest.TestCase):
         self.assertEqual(d["heldout_context"]["n_sessions"], 0)
         self.assertEqual(d["heldout_eval"]["n_sessions"], 2)
 
+    def test_zero_shot_finetune_has_no_context(self):
+        # snapshot fine-tune at K = 0 keeps train_session_ids as a reference set (no target_* key)
+        df = _frame()
+        bundle = SimpleNamespace(raw=df, metadata={
+            "train_session_ids": ["a", "c"], "eval_session_ids": ["b", "d"],
+            "adapt_sessions_per_subject": 0})
+        d = bundle_split_digests(bundle, heldout=True)
+        self.assertEqual(d["heldout_context"]["n_sessions"], 0)
+        self.assertEqual(bundle_split_digests(bundle)["train"]["n_sessions"], 2)  # training roles untouched
+
     def test_bundle_within_session_partition(self):
         df = _frame()
         df["external_split_partition"] = ["adapt" if t < 2 else "test" for t in df["trial"]]
@@ -217,6 +227,40 @@ class RunnerWiringTest(unittest.TestCase):
         run, bundle = self._run(trainer)
         self.assertFalse([k for k in run.summary if k.startswith("split/")])
         self.assertNotIn("split_digests", bundle.metadata)
+
+
+class EvaluatorLoadTest(unittest.TestCase):
+    """Held-out data an evaluator loads itself (after the runner's digest point) is digested."""
+
+    def test_evaluators_digest_the_data_they_load(self):
+        import tempfile
+        from pathlib import Path
+
+        from omegaconf import OmegaConf
+
+        import evaluation.disrnn_evaluation as de
+        import evaluation.gru_evaluation as ge
+
+        df = _frame()
+        loaded = {"df_test": df, "test_subject_ids": ["s1", "s2"], "dataset_test": None,
+                  "xs_test": None, "ys_test": None}
+        for module, loader, evaluate in (
+            (ge, "load_gru_heldout_subject_data", ge.evaluate_gru_on_heldout_subjects),
+            (de, "load_disrnn_heldout_subject_data", de.evaluate_disrnn_on_heldout_subjects),
+        ):
+            with self.subTest(evaluator=evaluate.__name__), tempfile.TemporaryDirectory() as out:
+                (Path(out) / "params.json").write_text("{}")
+                cfg = OmegaConf.create({
+                    "data": {"heldout_eval": True, "test_subject_ids": ["s1", "s2"], "ignore_policy": "exclude"},
+                    "model": {"architecture": {"multisubject": False}, "output_dir": out}})
+                run = SimpleNamespace(summary={}, log=lambda *a, **k: None)
+                with mock.patch.object(module, loader, return_value=loaded):
+                    try:  # placeholder params: evaluation fails after the load, which is enough here
+                        evaluate(cfg, wandb_run=run)
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.assertEqual(run.summary["split/heldout_eval/n_sessions"], 4)
+                self.assertNotIn("split/error", run.summary)
 
 
 if __name__ == "__main__":

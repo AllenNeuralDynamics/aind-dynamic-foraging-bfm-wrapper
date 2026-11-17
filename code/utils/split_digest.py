@@ -106,8 +106,8 @@ def bundle_split_digests(bundle: Any, *, heldout: bool = False) -> dict[str, dic
 
     ``heldout=True`` names the roles ``heldout_context`` / ``heldout_eval`` (a held-out cohort's
     adapt and scored sessions). The adapt sessions are ``target_adaptation_session_ids`` when an
-    external adaptation budget set it (at K = 0 ``train_session_ids`` keeps every session as a
-    reference set that is never adapted on). A role whose key is absent is not digested; an
+    external adaptation budget set it, and none when ``adapt_sessions_per_subject`` is 0 (at K = 0
+    ``train_session_ids`` keeps every session as a reference set that is never adapted on). A role whose key is absent is not digested; an
     explicitly empty list is digested as no sessions. ``ignore_policy`` defaults to
     ``"exclude"`` when the metadata does not carry it, as the trainers read it.
     """
@@ -115,6 +115,8 @@ def bundle_split_digests(bundle: Any, *, heldout: bool = False) -> dict[str, dic
     names = ("heldout_context", "heldout_eval") if heldout else ("train", "eval")
     context_key = "target_adaptation_session_ids" if "target_adaptation_session_ids" in meta else "train_session_ids"
     roles = {name: meta[key] for name, key in zip(names, (context_key, "eval_session_ids")) if key in meta}
+    if heldout and meta.get("adapt_sessions_per_subject") == 0:
+        roles[names[0]] = []  # zero-shot: the kept train sessions are a reference set, never adapted on
     if not roles:
         raise ValueError("split digest: the bundle metadata names no train or eval sessions")
     partition = None
@@ -124,6 +126,12 @@ def bundle_split_digests(bundle: Any, *, heldout: bool = False) -> dict[str, dic
                      names[1]: (column, meta.get("test_trial_partition", "test"))}
     return split_digests(bundle.raw, roles, ignore_policy=str(meta.get("ignore_policy", "exclude")),
                          partition=partition)
+
+
+def heldout_eval_digests(heldout_data: Mapping[str, Any], *, ignore_policy: str) -> dict[str, dict[str, Any]]:
+    """Single-subject held-out evaluation scores every session of ``heldout_data["df_test"]``."""
+    df = heldout_data["df_test"]
+    return split_digests(df, {"heldout_eval": df["ses_idx"].unique()}, ignore_policy=ignore_policy)
 
 
 def log_split_digests(wandb_run: Any, digests: Mapping[str, Mapping[str, Any]]) -> None:

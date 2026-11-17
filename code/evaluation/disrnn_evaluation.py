@@ -20,6 +20,7 @@ from evaluation.plotting import (
     save_figure,
 )
 from utils.load_mice_database import load_mice_from_database
+from utils.split_digest import heldout_eval_digests, record_split_digests
 
 from evaluation.heldout_eval_config import (
     HeldoutEvalConfig,
@@ -393,6 +394,10 @@ def evaluate_disrnn_on_heldout_subjects(
 
     if heldout_data is None:
         heldout_data = load_disrnn_heldout_subject_data(hydra_config)
+        # loaded here, after the runner's digest point: record what is scored (wrapper #131)
+        record_split_digests(wandb_run if log_to_wandb else None, lambda: heldout_eval_digests(
+            heldout_data, ignore_policy=str(heldout_cfg.ignore_policy)
+        ))
 
     df_test = heldout_data["df_test"]
     test_subject_ids = heldout_data["test_subject_ids"]
