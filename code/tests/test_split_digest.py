@@ -120,6 +120,10 @@ class SplitDigestTest(unittest.TestCase):
         d = self.digest(_frame(), ["a", "b", "c"])
         self.assertEqual((d["n_subjects"], d["n_sessions"], d["n_trials"]), (2, 3, 9))
 
+    def test_missing_subject_id_fails_loudly(self):
+        with self.assertRaises(ValueError):
+            split_digests(_frame().drop(columns="subject_id"), {"eval": ["a"]}, ignore_policy="exclude")
+
     def test_unknown_session_id_fails_loudly(self):
         with self.assertRaises(ValueError):
             split_digests(_frame(), {"eval": ["a", "zz"]}, ignore_policy="exclude")
@@ -199,15 +203,16 @@ class BundleAndLoggingTest(unittest.TestCase):
 class RunnerWiringTest(unittest.TestCase):
     """run_training logs the bundle's split unless the trainer logs what it used itself."""
 
-    def _run(self, trainer, model_type="fake", data=None):
+    def _run(self, trainer, model_type="fake", data=None, policy="exclude"):
         import training_runner
         from omegaconf import OmegaConf
 
         def _bundle(train, scored):
             df = _frame(composite=True)
-            return SimpleNamespace(raw=df, train_set=None, eval_set=None, extras={}, metadata={
-                "train_session_ids": _ids(df, train), "eval_session_ids": _ids(df, scored),
-                "ignore_policy": "exclude"})
+            meta = {"train_session_ids": _ids(df, train), "eval_session_ids": _ids(df, scored)}
+            if policy is not None:
+                meta["ignore_policy"] = policy
+            return SimpleNamespace(raw=df, train_set=None, eval_set=None, extras={}, metadata=meta)
 
         bundle, heldout = _bundle(["a", "c"], ["b", "d"]), _bundle(["a"], ["b", "c", "d"])
         run = SimpleNamespace(name="run", summary={}, config={})
@@ -240,6 +245,14 @@ class RunnerWiringTest(unittest.TestCase):
         self.assertEqual(run.summary["split/heldout_context/n_sessions"], 1)
         self.assertEqual(run.summary["split/heldout_eval/n_sessions"], 3)
         self.assertEqual(run.summary["split/train/n_sessions"], 2)
+
+    def test_glmhmm_missing_policy_means_include(self):
+        trainer = SimpleNamespace(fit=lambda bundle, loggers=None: {})
+        include, _ = self._run(trainer, model_type="glmhmm", policy=None)
+        exclude, _ = self._run(trainer, model_type="fake", policy=None)
+        explicit, _ = self._run(trainer, model_type="fake", policy="include")
+        self.assertEqual(include.summary["split/train/trials_sha256"], explicit.summary["split/train/trials_sha256"])
+        self.assertNotEqual(include.summary["split/train/trials_sha256"], exclude.summary["split/train/trials_sha256"])
 
     def test_trainer_that_logs_its_own_split_is_left_alone(self):
         trainer = SimpleNamespace(fit=lambda bundle, loggers=None: {}, logs_own_split_digests=True)

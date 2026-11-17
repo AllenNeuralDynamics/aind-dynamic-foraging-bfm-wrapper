@@ -343,14 +343,18 @@ def run_training(hydra_config, wandb_run=None, run_output_dir="/results"):
     # Split digests (wrapper #131): one identity for the data each role used. HB-family
     # trainers fit on more than the bundle's train split and log what they used themselves.
     logs_own_split = bool(getattr(model_trainer, "logs_own_split_digests", False))
+    # a missing ignore_policy means what the trainer reads it as: GLM-HMM fits ignores
+    default_policy = "include" if model_type == "glmhmm" else "exclude"
     if not logs_own_split:
-        digests = record_split_digests(wandb_run, lambda: bundle_split_digests(dataset_bundle))
+        digests = record_split_digests(wandb_run, lambda: bundle_split_digests(
+            dataset_bundle, default_ignore_policy=default_policy
+        ))
         if digests is not None:
             dataset_bundle.metadata["split_digests"] = dict(digests)
         if runner_heldout_bundle is not None:
-            record_split_digests(
-                wandb_run, lambda: bundle_split_digests(runner_heldout_bundle, heldout=True)
-            )
+            record_split_digests(wandb_run, lambda: bundle_split_digests(
+                runner_heldout_bundle, heldout=True, default_ignore_policy=default_policy
+            ))
     loggers = {"wandb": wandb_run} if wandb_run is not None else None
     output = model_trainer.fit(dataset_bundle, loggers=loggers)
     if heldout_test_data is None:

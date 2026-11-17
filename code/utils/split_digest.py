@@ -59,7 +59,7 @@ def split_digests(
     Parameters
     ----------
     raw : pd.DataFrame
-        Trial rows with ``ses_idx``; ``subject_id``, ``source_ses_idx``, ``trial`` and
+        Trial rows with ``subject_id`` and ``ses_idx``; ``source_ses_idx``, ``trial`` and
         ``animal_response`` are used when present (no ``trial`` column: the row's position in its
         session, counted before any filter).
     roles : mapping
@@ -75,6 +75,9 @@ def split_digests(
     dict
         Role -> ``{"sessions_sha256", "trials_sha256", "n_subjects", "n_sessions", "n_trials"}``.
     """
+    if "subject_id" not in raw.columns:
+        # without it a multi-subject cohort would hash as one subject; refuse rather than guess
+        raise ValueError("split digest: the data has no subject_id column")
     known = set(raw["ses_idx"].astype(str))
     source = "source_ses_idx" if "source_ses_idx" in raw.columns else "ses_idx"
     if "trial" not in raw.columns:
@@ -93,7 +96,7 @@ def split_digests(
             df = df[df[column] == value]
         if ignore_policy == "exclude" and "animal_response" in df.columns:
             df = df[df["animal_response"] != 2]
-        subjects = df["subject_id"] if "subject_id" in df.columns else pd.Series("", index=df.index)
+        subjects = df["subject_id"]
         sessions: dict[tuple[str, str], list[Any]] = {}
         for (subject, session), rows in df.groupby([subjects, df[source]], sort=False):
             key = (str(normalize_subject_id(subject)), str(normalize_subject_id(session)))
@@ -111,15 +114,18 @@ def split_digests(
     return out
 
 
-def bundle_split_digests(bundle: Any, *, heldout: bool = False) -> dict[str, dict[str, Any]]:
+def bundle_split_digests(
+    bundle: Any, *, heldout: bool = False, default_ignore_policy: str = "exclude"
+) -> dict[str, dict[str, Any]]:
     """Digest a ``DatasetBundle``'s train / eval split, as its metadata names it.
 
     ``heldout=True`` names the roles ``heldout_context`` / ``heldout_eval`` (a held-out cohort's
     adapt and scored sessions). The adapt sessions are ``target_adaptation_session_ids`` when an
     external adaptation budget set it, and none when ``adapt_sessions_per_subject`` is 0 (at K = 0
     ``train_session_ids`` keeps every session as a reference set that is never adapted on). A role whose key is absent is not digested; an
-    explicitly empty list is digested as no sessions. ``ignore_policy`` defaults to
-    ``"exclude"`` when the metadata does not carry it, as the trainers read it.
+    explicitly empty list is digested as no sessions. When the metadata does not carry
+    ``ignore_policy``, ``default_ignore_policy`` stands in: pass the consuming trainer's own
+    default (``"exclude"`` for most; GLM-HMM reads a missing policy as ``"include"``).
     """
     meta = bundle.metadata
     names = ("heldout_context", "heldout_eval") if heldout else ("train", "eval")
@@ -134,7 +140,8 @@ def bundle_split_digests(bundle: Any, *, heldout: bool = False) -> dict[str, dic
     if column:
         partition = {names[0]: (column, meta.get("adapt_trial_partition", "adapt")),
                      names[1]: (column, meta.get("test_trial_partition", "test"))}
-    return split_digests(bundle.raw, roles, ignore_policy=str(meta.get("ignore_policy", "exclude")),
+    return split_digests(bundle.raw, roles,
+                         ignore_policy=str(meta.get("ignore_policy", default_ignore_policy)),
                          partition=partition)
 
 

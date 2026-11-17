@@ -625,6 +625,8 @@ A run writes to `/results/`:
     (`heldout_*`; `heldout_context` is empty at `adapt_sessions_per_subject: 0`). `HBTrainer` and `HBStanTrainer` log what they actually use instead
     (`logs_own_split_digests`): the population fit takes every session of `bundle.raw`, and
     held-out subjects are split with the trainer's own `eval_every_n`.
+  - A digest needs a `subject_id` column. A missing `ignore_policy` is read as the trainer reads
+    it (`include` for GLM-HMM, else `exclude`).
   - A digest that cannot be computed never stops the run; it logs `split/error`.
   - `glmhmm/global/train_data_sha256` is unchanged (it guards a reused global fit).
 
