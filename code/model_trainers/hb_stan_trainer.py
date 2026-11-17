@@ -55,6 +55,7 @@ from model_trainers.hb_trainer import (
     _pad_cohort,
     _source_revisions,
 )
+from utils.split_digest import record_split_digests, split_digests
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,10 @@ def cohort_to_stan_data(choice_arr, reward_arr, valid_mask, session_mask,
 class HBStanTrainer(ModelTrainer):
     """Fit the joint three-level model with pystan on the same cohort as ``HBTrainer``."""
 
+    # Fits every session of bundle.raw (as HBTrainer does), so it logs the split digest of
+    # what it used (wrapper #131) instead of the runner logging the bundle's split.
+    logs_own_split_digests = True
+
     def __init__(
         self,
         num_warmup: int = 2000,
@@ -188,7 +193,11 @@ class HBStanTrainer(ModelTrainer):
         # fails here with a clear message rather than after the cohort has been assembled.
         program = _stan_program()
 
-        choices, rewards, _ = _extract_subject_sessions(bundle.raw)
+        choices, rewards, fit_session_ids = _extract_subject_sessions(bundle.raw)
+        record_split_digests(wandb_run, lambda: split_digests(
+            bundle.raw, {"train": [s for ids in fit_session_ids.values() for s in ids]},
+            ignore_policy="exclude",
+        ))
         choice_arr, reward_arr, valid_mask, session_mask, subject_ids = _pad_cohort(
             choices, rewards
         )

@@ -1677,6 +1677,10 @@ class TestBaselineRLTrainer(unittest.TestCase):
             self.assertEqual(output["heldout_test"]["test_likelihood"], 0.42)
             self.assertEqual(fake_run.summary["heldout/eval_likelihood"], 0.42)
             self.assertIn("resolved_subject_ids", fake_run.config)
+            # split digests of the held-out cohort's adapt / scored sessions (wrapper #131)
+            for role in ("heldout_context", "heldout_eval"):
+                self.assertRegex(fake_run.summary[f"split/{role}/sessions_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("split/error", fake_run.summary)
             self.assertTrue((Path(tmpdir) / "baseline_rl_output.json").exists())
 
     def test_prefix_subject_record_replays_full_sequence_and_scores_suffix(self):

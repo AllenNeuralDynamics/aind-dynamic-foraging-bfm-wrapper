@@ -3,12 +3,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
 import pandas as pd
 
 from base.types import DatasetBundle
+from utils.multisubject import compute_train_eval_session_ids
+from utils.split_digest import split_digests
 from model_trainers.hb_trainer import (
     _extract_subject_sessions,
     _normalized_likelihood,
@@ -171,10 +174,28 @@ class TestFit(unittest.TestCase):
             estimator="one_stage", num_warmup=30, num_samples=30, num_chains=1,
             few_shot_k=(0,), eval_every_n=2, seed=0,
         )
-        scores = trainer.fit(bundle)["heldout_likelihood"]
+        run = SimpleNamespace(summary={}, log=lambda payload: None)
+        scores = trainer.fit(bundle, loggers={"wandb": run})["heldout_likelihood"]
         self.assertIn("matched", scores)
         self.assertGreater(scores["matched"], 0.0)
         self.assertLess(scores["matched"], 1.0)
+
+        # Split digests (wrapper #131) describe what HB used: the population fit takes every
+        # training-cohort session, and the matched rung's split is the loaders' every-n rule.
+        self.assertEqual(run.summary["split/train/n_sessions"], 9)
+        heldout = bundle.extras["heldout_raw"]
+        context, scored = [], []
+        for subject in ("m0", "m1"):
+            ids = list(dict.fromkeys(heldout.loc[heldout["subject_id"] == subject, "ses_idx"]))
+            train_ids, eval_ids = compute_train_eval_session_ids(ids, 2)
+            context += train_ids
+            scored += eval_ids
+        expected = split_digests(heldout, {"heldout_context": context, "heldout_eval": scored},
+                                 ignore_policy="exclude")
+        for role in ("heldout_context", "heldout_eval"):
+            self.assertEqual(run.summary[f"split/{role}/sessions_sha256"],
+                             expected[role]["sessions_sha256"])
+            self.assertEqual(run.summary[f"split/{role}/n_sessions"], 4)
 
 
 @unittest.skipUnless(HAS_BAYES, "requires the 'bayes' extra (jax, numpyro)")
@@ -235,6 +256,10 @@ class TestHeldoutTwoLevel(unittest.TestCase):
                     "heldout/n_sessions_pareto_k_fail", "heldout/pareto_k_threshold"):
             self.assertIn(key, summary)
         self.assertNotIn("heldout/test_likelihood", summary)
+        # split digests of the context and scored sessions; no training cohort, so no train role
+        self.assertEqual(summary["split/heldout_context/n_sessions"], 4)
+        self.assertEqual(summary["split/heldout_eval/n_sessions"], 4)
+        self.assertNotIn("split/train/n_sessions", summary)
         # The totals reproduce the pooled likelihood, so separate runs can be pooled exactly.
         self.assertAlmostEqual(
             np.exp(summary["heldout/eval_log_lik_sum"] / summary["heldout/num_eval_trials"]),

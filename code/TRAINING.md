@@ -606,6 +606,25 @@ A run writes to `/results/`:
   `heldout/eval_likelihood`, `heldout/train_loss`, `heldout/eval_loss`,
   `heldout/step`, and `heldout/final/*` — logged into the **same** run, on a step
   axis offset past the training steps.
+- Split digests (`utils/split_digest.py`, wrapper #131): `split/<role>/sessions_sha256`,
+  `split/<role>/trials_sha256`, `split/<role>/n_subjects`, `n_sessions`, `n_trials`, for the
+  roles `train`, `eval` (training cohort) and `heldout_context`, `heldout_eval` (held-out
+  subjects' adapt and scored sessions). Two runs share a digest only if they used the same data,
+  whatever model family or platform they came from.
+  - `sessions_sha256`: the sorted (subject id, original session id) pairs with at least one
+    used trial. The original id is `source_ses_idx` when the multisubject builder rewrote
+    `ses_idx`, so both loader paths agree. Membership only: an `include` and an `exclude` run on
+    the same sessions match.
+  - `trials_sha256`: the same plus `ignore_policy` and each session's sorted trial ids (only the
+    adapt prefix / test suffix for an external within-session split). Strict identity.
+  - The role name is not hashed, so the same data under two roles gives the same digest.
+  - Logged by the runner for the training bundle (also in `multisubject_metadata.json` under
+    `split_digests`) and for each held-out bundle it loads, and by the held-out fine-tune
+    (`heldout_*`). `HBTrainer` and `HBStanTrainer` log what they actually use instead
+    (`logs_own_split_digests`): the population fit takes every session of `bundle.raw`, and
+    held-out subjects are split with the trainer's own `eval_every_n`.
+  - A digest that cannot be computed never stops the run; it logs `split/error`.
+  - `glmhmm/global/train_data_sha256` is unchanged (it guards a reused global fit).
 
 ---
 
@@ -726,6 +745,10 @@ environment.
 ## Changelog
 
 > Add a dated entry (newest first) whenever you add or change a feature.
+
+### 2026-11-16
+- **Split digests (#131).** Every run logs `split/<role>/{sessions,trials}_sha256` so reports
+  can check that two models used the same data. See §7.
 
 ### 2026-11-01
 - **`GLMHMMTrainer`: `transition_strength_subject`.** The per-subject refits' transition prior
