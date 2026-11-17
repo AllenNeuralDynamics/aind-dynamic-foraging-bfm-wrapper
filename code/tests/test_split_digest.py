@@ -97,6 +97,25 @@ class SplitDigestTest(unittest.TestCase):
         self.assertNotEqual(d["train"]["trials_sha256"], d["eval"]["trials_sha256"])
         self.assertEqual((d["train"]["n_trials"], d["eval"]["n_trials"]), (2, 1))
 
+    def test_trial_index_storage_type_does_not_matter(self):
+        df = _frame()
+        as_str, as_float = df.assign(trial=df["trial"].astype(str)), df.assign(trial=df["trial"].astype(float))
+        self.assertEqual(self.digest(df, ["a"]), self.digest(as_str, ["a"]))
+        self.assertEqual(self.digest(df, ["a"]), self.digest(as_float, ["a"]))
+
+    def test_without_trial_column_positions_survive_filtering(self):
+        # an adapt prefix and a disjoint suffix of equal length must not share a trials digest
+        df = _frame().drop(columns="trial")
+        df = pd.concat([df, df[df["ses_idx"] == "a"]], ignore_index=True)  # session a: 6 rows
+        df = df.sort_values("ses_idx", kind="stable").reset_index(drop=True)
+        df["part"] = ["test"] * len(df)
+        a_rows = df.index[df["ses_idx"] == "a"]
+        df.loc[a_rows[:3], "part"] = "adapt"
+        d = split_digests(df, {"train": ["a"], "eval": ["a"]}, ignore_policy="include",
+                          partition={"train": ("part", "adapt"), "eval": ("part", "test")})
+        self.assertEqual((d["train"]["n_trials"], d["eval"]["n_trials"]), (3, 3))
+        self.assertNotEqual(d["train"]["trials_sha256"], d["eval"]["trials_sha256"])
+
     def test_counts(self):
         d = self.digest(_frame(), ["a", "b", "c"])
         self.assertEqual((d["n_subjects"], d["n_sessions"], d["n_trials"]), (2, 3, 9))
@@ -256,7 +275,8 @@ class EvaluatorLoadTest(unittest.TestCase):
                 run = SimpleNamespace(summary={}, log=lambda *a, **k: None)
                 with mock.patch.object(module, loader, return_value=loaded):
                     try:  # placeholder params: evaluation fails after the load, which is enough here
-                        evaluate(cfg, wandb_run=run)
+                        # the runner turns metric logging off; provenance is still recorded
+                        evaluate(cfg, wandb_run=run, log_to_wandb=False)
                     except Exception:  # noqa: BLE001
                         pass
                 self.assertEqual(run.summary["split/heldout_eval/n_sessions"], 4)

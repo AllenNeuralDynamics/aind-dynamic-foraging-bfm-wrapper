@@ -300,6 +300,30 @@ class TestBaselineRLTrainer(unittest.TestCase):
         self.assertGreater(output["train_likelihood"], 0.0)
         self.assertLess(output["train_likelihood"], 1.0)
 
+    def test_multisubject_digest_is_the_split_actually_fitted(self):
+        """Without split metadata the trainer derives an every-n split; the digest follows it."""
+        metadata = dict(self.multisubject_bundle.metadata)
+        metadata.pop("train_session_ids")
+        metadata.pop("eval_session_ids")
+        bundle = DatasetBundle(raw=self.multisubject_bundle.raw.copy(), train_set=None,
+                               eval_set=None, metadata=metadata)
+        trainer = BaselineRLTrainer(
+            agent_class="ForagerQLearning",
+            agent_kwargs={"number_of_learning_rate": 1, "number_of_forget_rate": 0,
+                          "choice_kernel": "none", "action_selection": "softmax"},
+            DE_kwargs={"workers": 1, "maxiter": 2, "popsize": 4},
+            output_dir=str(self.output_dir / "digest_fallback"),
+            seed=0,
+        )
+        run = mock.MagicMock(id="digest-test", name="digest-test")
+        run.summary = {}
+        trainer.fit(bundle, loggers={"wandb": run})
+        # three sessions per subject, every second one scored: 2 x 2 fitted, 2 x 1 scored
+        self.assertNotIn("split/error", run.summary)
+        self.assertEqual(run.summary["split/train/n_sessions"], 4)
+        self.assertEqual(run.summary["split/eval/n_sessions"], 2)
+        self.assertEqual(bundle.metadata["split_digests"]["eval"]["n_sessions"], 2)
+
     def test_groundtruth_comparison(self):
         """Test that groundtruth likelihood is included in output when available."""
         trainer = BaselineRLTrainer(

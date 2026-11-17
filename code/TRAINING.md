@@ -620,7 +620,8 @@ A run writes to `/results/`:
   - The role name is not hashed, so the same data under two roles gives the same digest.
   - Logged by the runner for the training bundle (also in `multisubject_metadata.json` under
     `split_digests`) and for each held-out bundle it loads, by the GRU/disRNN held-out
-    evaluators when they load held-out data themselves, and by the held-out fine-tune
+    evaluators when they load held-out data themselves, by the multisubject baseline RL trainer
+    from the split it resolved, and by the held-out fine-tune
     (`heldout_*`; `heldout_context` is empty at `adapt_sessions_per_subject: 0`). `HBTrainer` and `HBStanTrainer` log what they actually use instead
     (`logs_own_split_digests`): the population fit takes every session of `bundle.raw`, and
     held-out subjects are split with the trainer's own `eval_every_n`.

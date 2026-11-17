@@ -500,7 +500,8 @@ def evaluate_gru_on_heldout_subjects(
     if heldout_data is None:
         heldout_data = load_gru_heldout_subject_data(hydra_config)
         # loaded here, after the runner's digest point: record what is scored (wrapper #131)
-        record_split_digests(wandb_run if log_to_wandb else None, lambda: heldout_eval_digests(
+        # provenance goes to the run even when metric logging is off (the runner passes False)
+        record_split_digests(wandb_run, lambda: heldout_eval_digests(
             heldout_data, ignore_policy=str(heldout_cfg.ignore_policy)
         ))
 

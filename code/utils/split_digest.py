@@ -38,8 +38,13 @@ def _sha256(payload: Mapping[str, Any]) -> str:
 
 
 def _trial_id(value: Any) -> Any:
+    """One form per trial index: 3, 3.0, "3" and np.int64(3) all hash as 3."""
     value = normalize_subject_id(value)
-    return int(value) if isinstance(value, float) and value.is_integer() else value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return value
 
 
 def split_digests(
@@ -55,7 +60,8 @@ def split_digests(
     ----------
     raw : pd.DataFrame
         Trial rows with ``ses_idx``; ``subject_id``, ``source_ses_idx``, ``trial`` and
-        ``animal_response`` are used when present (no ``trial`` column: row order in the session).
+        ``animal_response`` are used when present (no ``trial`` column: the row's position in its
+        session, counted before any filter).
     roles : mapping
         Role name -> the session ids it uses, as they appear in ``raw["ses_idx"]``.
     ignore_policy : str
@@ -71,6 +77,10 @@ def split_digests(
     """
     known = set(raw["ses_idx"].astype(str))
     source = "source_ses_idx" if "source_ses_idx" in raw.columns else "ses_idx"
+    if "trial" not in raw.columns:
+        # positions in the whole session, taken before any role or ignore filter, so a prefix and
+        # a disjoint suffix of the same length do not both become 0..n-1
+        raw = raw.assign(trial=raw.groupby("ses_idx", sort=False).cumcount())
     out: dict[str, dict[str, Any]] = {}
     for role, ids in roles.items():
         wanted = {str(i) for i in ids}
@@ -87,7 +97,7 @@ def split_digests(
         sessions: dict[tuple[str, str], list[Any]] = {}
         for (subject, session), rows in df.groupby([subjects, df[source]], sort=False):
             key = (str(normalize_subject_id(subject)), str(normalize_subject_id(session)))
-            trials = rows["trial"].map(_trial_id).tolist() if "trial" in rows.columns else list(range(len(rows)))
+            trials = rows["trial"].map(_trial_id).tolist()
             sessions[key] = sorted(trials)
         keys = sorted(sessions)
         out[role] = {
