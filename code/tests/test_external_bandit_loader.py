@@ -19,6 +19,7 @@ from data_loaders.external_bandit import (
     load_external_split_manifest,
     validate_canonical_bandit_table,
 )
+from utils.split_digest import bundle_split_digests
 
 
 def _optional_dependency_stubs():
@@ -363,6 +364,14 @@ class TestExternalBanditDatasetLoader(unittest.TestCase):
         self.assertEqual(bundle.metadata["adapt_trial_partition"], "adapt")
         self.assertEqual(bundle.metadata["test_trial_partition"], "test")
         self.assertIs(bundle.train_set.rng, bundle.eval_set.rng)
+        # split digests (wrapper #131) read the partition from bundle.raw: same sessions,
+        # adapt prefix vs scored suffix
+        digests = bundle_split_digests(bundle, heldout=True)
+        context, scored = digests["heldout_context"], digests["heldout_eval"]
+        self.assertEqual((context["n_sessions"], context["n_trials"]), (2, 6))
+        self.assertEqual((scored["n_sessions"], scored["n_trials"]), (2, 6))
+        self.assertEqual(context["sessions_sha256"], scored["sessions_sha256"])
+        self.assertNotEqual(context["trials_sha256"], scored["trials_sha256"])
 
     def test_session_budget_uses_first_manifest_adaptation_session(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -465,6 +474,10 @@ class TestExternalBanditDatasetLoader(unittest.TestCase):
         )
         self.assertTrue(bundle.metadata["zero_shot_train_set_is_reference"])
         self.assertFalse(bundle.raw["target_adaptation_selected"].any())
+        # the held-out context digest names the sessions adapted on (none), not the reference set
+        digests = bundle_split_digests(bundle, heldout=True)
+        self.assertEqual(digests["heldout_context"]["n_sessions"], 0)
+        self.assertEqual(digests["heldout_eval"]["n_sessions"], 4)
 
 if __name__ == "__main__":
     unittest.main()

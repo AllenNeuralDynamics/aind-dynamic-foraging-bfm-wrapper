@@ -105,12 +105,18 @@ def bundle_split_digests(bundle: Any, *, heldout: bool = False) -> dict[str, dic
     """Digest a ``DatasetBundle``'s train / eval split, as its metadata names it.
 
     ``heldout=True`` names the roles ``heldout_context`` / ``heldout_eval`` (a held-out cohort's
-    adapt and scored sessions). ``ignore_policy`` defaults to ``"exclude"`` when the metadata does
-    not carry it, as the trainers read it.
+    adapt and scored sessions). The adapt sessions are ``target_adaptation_session_ids`` when an
+    external adaptation budget set it (at K = 0 ``train_session_ids`` keeps every session as a
+    reference set that is never adapted on). A role whose key is absent is not digested; an
+    explicitly empty list is digested as no sessions. ``ignore_policy`` defaults to
+    ``"exclude"`` when the metadata does not carry it, as the trainers read it.
     """
     meta = bundle.metadata
     names = ("heldout_context", "heldout_eval") if heldout else ("train", "eval")
-    roles = {names[0]: meta.get("train_session_ids") or [], names[1]: meta.get("eval_session_ids") or []}
+    context_key = "target_adaptation_session_ids" if "target_adaptation_session_ids" in meta else "train_session_ids"
+    roles = {name: meta[key] for name, key in zip(names, (context_key, "eval_session_ids")) if key in meta}
+    if not roles:
+        raise ValueError("split digest: the bundle metadata names no train or eval sessions")
     partition = None
     column = meta.get("trial_partition_column")
     if column:

@@ -10,8 +10,7 @@ import numpy as np
 import pandas as pd
 
 from base.types import DatasetBundle
-from utils.multisubject import compute_train_eval_session_ids
-from utils.split_digest import split_digests
+from utils.split_digest import bundle_split_digests
 from model_trainers.hb_trainer import (
     _extract_subject_sessions,
     _normalized_likelihood,
@@ -164,11 +163,19 @@ class TestFit(unittest.TestCase):
         exactly the ones it scores, so the two sit on the same footing rather than being
         compared across different amounts of conditioning.
         """
+        from data_loaders.mice import _build_multisubject_bundle
+
+        # the held-out cohort as the real loader builds it (composite ses_idx, every-n split)
+        heldout_bundle = _build_multisubject_bundle(
+            df=_make_frame(n_subjects=2, n_sessions=4, n_trials=50, seed=7),
+            resolved_subject_ids=None, ignore_policy="exclude", features=None,
+            eval_every_n=2, batch_size=None, batch_mode="single",
+            metadata={"ignore_policy": "exclude"},
+        )
         bundle = DatasetBundle(
             raw=_make_frame(n_subjects=3, n_sessions=3, n_trials=50, seed=0),
             train_set=None, eval_set=None, metadata={},
-            extras={"heldout_raw": _make_frame(n_subjects=2, n_sessions=4,
-                                               n_trials=50, seed=7)},
+            extras={"heldout_raw": heldout_bundle.raw},
         )
         trainer = HBTrainer(
             estimator="one_stage", num_warmup=30, num_samples=30, num_chains=1,
@@ -181,21 +188,14 @@ class TestFit(unittest.TestCase):
         self.assertLess(scores["matched"], 1.0)
 
         # Split digests (wrapper #131) describe what HB used: the population fit takes every
-        # training-cohort session, and the matched rung's split is the loaders' every-n rule.
+        # training-cohort session, and with the same eval_every_n the matched rung's held-out
+        # split digests equal the loader's split of the same cohort.
         self.assertEqual(run.summary["split/train/n_sessions"], 9)
-        heldout = bundle.extras["heldout_raw"]
-        context, scored = [], []
-        for subject in ("m0", "m1"):
-            ids = list(dict.fromkeys(heldout.loc[heldout["subject_id"] == subject, "ses_idx"]))
-            train_ids, eval_ids = compute_train_eval_session_ids(ids, 2)
-            context += train_ids
-            scored += eval_ids
-        expected = split_digests(heldout, {"heldout_context": context, "heldout_eval": scored},
-                                 ignore_policy="exclude")
+        expected = bundle_split_digests(heldout_bundle, heldout=True)
         for role in ("heldout_context", "heldout_eval"):
-            self.assertEqual(run.summary[f"split/{role}/sessions_sha256"],
-                             expected[role]["sessions_sha256"])
             self.assertEqual(run.summary[f"split/{role}/n_sessions"], 4)
+            for key in ("sessions_sha256", "trials_sha256"):
+                self.assertEqual(run.summary[f"split/{role}/{key}"], expected[role][key])
 
 
 @unittest.skipUnless(HAS_BAYES, "requires the 'bayes' extra (jax, numpyro)")

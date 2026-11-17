@@ -119,6 +119,25 @@ class BundleAndLoggingTest(unittest.TestCase):
         held = bundle_split_digests(bundle, heldout=True)
         self.assertEqual(set(held), {"heldout_context", "heldout_eval"})
 
+    def test_absent_role_is_not_digested_but_empty_is(self):
+        df = _frame()
+        only_eval = SimpleNamespace(raw=df, metadata={"eval_session_ids": ["b"]})
+        self.assertEqual(set(bundle_split_digests(only_eval)), {"eval"})
+        empty = SimpleNamespace(raw=df, metadata={"train_session_ids": [], "eval_session_ids": ["b"]})
+        self.assertEqual(bundle_split_digests(empty)["train"]["n_sessions"], 0)
+        with self.assertRaises(ValueError):
+            bundle_split_digests(SimpleNamespace(raw=df, metadata={}))
+
+    def test_adaptation_budget_names_the_adapted_sessions(self):
+        # at K = 0 train_session_ids keeps every session as a reference set; none is adapted on
+        df = _frame()
+        bundle = SimpleNamespace(raw=df, metadata={
+            "train_session_ids": ["a", "c"], "eval_session_ids": ["b", "d"],
+            "target_adaptation_session_ids": []})
+        d = bundle_split_digests(bundle, heldout=True)
+        self.assertEqual(d["heldout_context"]["n_sessions"], 0)
+        self.assertEqual(d["heldout_eval"]["n_sessions"], 2)
+
     def test_bundle_within_session_partition(self):
         df = _frame()
         df["external_split_partition"] = ["adapt" if t < 2 else "test" for t in df["trial"]]
@@ -151,20 +170,26 @@ class BundleAndLoggingTest(unittest.TestCase):
 class RunnerWiringTest(unittest.TestCase):
     """run_training logs the bundle's split unless the trainer logs what it used itself."""
 
-    def _run(self, trainer):
+    def _run(self, trainer, model_type="fake", data=None):
         import training_runner
         from omegaconf import OmegaConf
 
-        df = _frame(composite=True)
-        bundle = SimpleNamespace(raw=df, train_set=None, eval_set=None, extras={}, metadata={
-            "train_session_ids": _ids(df, ["a", "c"]), "eval_session_ids": _ids(df, ["b", "d"]),
-            "ignore_policy": "exclude"})
-        loader = SimpleNamespace(load=lambda: bundle)
+        def _bundle(train, scored):
+            df = _frame(composite=True)
+            return SimpleNamespace(raw=df, train_set=None, eval_set=None, extras={}, metadata={
+                "train_session_ids": _ids(df, train), "eval_session_ids": _ids(df, scored),
+                "ignore_policy": "exclude"})
+
+        bundle, heldout = _bundle(["a", "c"], ["b", "d"]), _bundle(["a"], ["b", "c", "d"])
         run = SimpleNamespace(name="run", summary={}, config={})
-        config = OmegaConf.create({"data": {"type": "fake"}, "model": {"type": "fake"}, "seed": 0})
+        config = OmegaConf.create({"data": data or {"type": "fake"}, "model": {"type": model_type},
+                                   "seed": 0})
 
         def _instantiate(cfg, *args, **kwargs):
-            return loader if cfg is config.data else trainer
+            if cfg is config.data:  # the held-out loader is the data config with split="heldout"
+                chosen = heldout if kwargs.get("split") == "heldout" else bundle
+                return SimpleNamespace(load=lambda: chosen)
+            return trainer
 
         with mock.patch.object(training_runner, "instantiate", side_effect=_instantiate):
             training_runner.run_training(config, wandb_run=run)
@@ -177,6 +202,15 @@ class RunnerWiringTest(unittest.TestCase):
             self.assertEqual(run.summary[f"split/{role}/n_sessions"], 2)
         self.assertEqual(bundle.metadata["split_digests"]["train"]["sessions_sha256"],
                          run.summary["split/train/sessions_sha256"])
+
+    def test_glmhmm_heldout_bundle_is_digested(self):
+        trainer = SimpleNamespace(fit=lambda bundle, loggers=None: {})
+        data = {"type": "mice_snapshot", "mature_only": False, "min_sessions": 1, "heldout_every_n": 5}
+        run, _ = self._run(trainer, model_type="glmhmm", data=data)
+        self.assertNotIn("split/error", run.summary)
+        self.assertEqual(run.summary["split/heldout_context/n_sessions"], 1)
+        self.assertEqual(run.summary["split/heldout_eval/n_sessions"], 3)
+        self.assertEqual(run.summary["split/train/n_sessions"], 2)
 
     def test_trainer_that_logs_its_own_split_is_left_alone(self):
         trainer = SimpleNamespace(fit=lambda bundle, loggers=None: {}, logs_own_split_digests=True)
